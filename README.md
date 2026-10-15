@@ -42,26 +42,36 @@ Without `--single`, both `<name>.svg` and `<name>.png` are written next to each 
 
 ### `orna generate`
 
-Generates a full artwork from a preset. The preset compositions are not implemented yet, so this command currently exits with the error `preset not implemented yet`.
+Generates a full artwork from a preset. The same config always gives byte-identical output.
 
 ```sh
-orna generate --seed 42 --preset botanica --output out/artwork.png
-orna generate --config my.json --seed 7 --save-config --output out/artwork.svg
+orna generate --seed 1234 --preset botanica --output out/artwork.png
+orna generate --seed 7 --preset bloom --palette moonlit --output out/bloom.svg
+orna generate --seed 5 --save-config --output out/a.png
+orna generate --config out/a.json --output out/again.png
 ```
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--seed <SEED>` | `42` | Master seed |
 | `--preset <PRESET>` | `botanica` | `botanica`, `bloom` or `ribbons` |
-| `-o, --output <OUTPUT>` | `artwork.png` | Output path ending in `.svg` or `.png` |
+| `-o, --output <OUTPUT>` | `artwork.png` | Output path ending in `.svg` or `.png`; missing directories are created |
 | `--width <WIDTH>` | `1200` | Canvas width |
 | `--height <HEIGHT>` | `1800` | Canvas height |
-| `--palette <PALETTE>` | `botanica` | Palette name |
-| `--detail <DETAIL>` | `1` | Global detail multiplier, in `(0, 10]` |
+| `--palette <PALETTE>` | `botanica` | Palette name (see `orna palettes`) |
+| `--detail <DETAIL>` | `1` | Detail multiplier in `(0, 10]`: scales the path budget (55 000 paths at 1), the amount of background foliage and the branching of plants |
 | `--scale <SCALE>` | `1` | PNG scale factor relative to the SVG size |
 | `--config <CONFIG>` | none | JSON config to load; flags given explicitly override its fields |
 | `--save-config` | off | Also write the effective config as `<name>.json` |
 | `--single` | off | Write only the format of `--output` |
+
+Two options exist only in the JSON config: `opening` (default `true`) shows the moonlit opening of the botanica preset, and `density` (default `1`, range `[0, 4]`) multiplies the number of filler elements (background foliage, small flowers). Configs without them load with the defaults.
+
+Presets:
+
+- `botanica`: a poster split by an S-shaped divider band into a warm region (magenta, rose, plum) and a cool one (blue, sage, lavender); the warm side lands left or right by seed. Large focal flowers sit on collars of leaves at the centres of two counter-rotating vortices. Ribbons follow the longest streamlines of that field and roll into spiral tails, thin vines with leaves and small flowers follow the shorter ones, plants grow from the bottom edge, and dim background foliage fills the gaps that are left. A moonlit window (moon, stars, hills, framed by a wreath of leaves) opens in the upper cool region.
+- `bloom`: one large flower of a random species on a collar of leaves and a leafy stem, between two scroll ribbons, one warm and one cool.
+- `ribbons`: ribbons and spirals only: the divider band and ribbons along the field's streamlines, warm on one side of the divider and cool on the other.
 
 ### `orna palettes`
 
