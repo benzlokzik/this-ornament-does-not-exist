@@ -27,8 +27,9 @@ pub enum LeafShape {
     Ovate,
     /// Heart-shaped: two rounded lobes sweep back around the petiole.
     Cordate,
-    /// Deeply lobed Art Nouveau acanthus; `lobes` (3–7) claw-like lobes with pointed tips
-    /// leaning towards the leaf tip.
+    /// Deeply lobed Art Nouveau acanthus: `lobes` (3–7) big rounded lobes per side that lean
+    /// towards the leaf tip and shrink towards it, each scalloped into two or three rounded
+    /// sub-lobes, with deep rounded sinuses (see [`LeafParams::lobes`]).
     Acanthus {
         /// Number of lobes per side, clamped to `3..=7`.
         lobes: u32,
@@ -57,7 +58,7 @@ impl LeafShape {
             LeafShape::Acanthus { .. } => (0.42, 0.62, 0.35, 0.7),
             LeafShape::Serrated { .. } => (0.42, 0.36, 0.4, 0.7),
             LeafShape::Willow => (0.42, 0.1, 0.7, 0.85),
-            LeafShape::Fern { .. } => (0.45, 0.34, 0.45, 0.6),
+            LeafShape::Fern { .. } => (0.4, 0.34, 0.65, 0.45),
         }
     }
 }
@@ -212,7 +213,7 @@ impl<C: Curve> Leaf<C> {
         };
         // Lobes, teeth and pinnae lean towards the tip.
         let lean = match params.shape {
-            LeafShape::Acanthus { .. } => 0.3,
+            LeafShape::Acanthus { .. } => 0.5,
             LeafShape::Serrated { .. } => 0.2,
             LeafShape::Fern { .. } => 0.45,
             _ => 0.0,
@@ -325,12 +326,7 @@ fn side_profile(p: &LeafParams, sign: f64, half: f64) -> WidthProfile {
     match p.shape {
         LeafShape::Acanthus { lobes } => {
             let n = lobes.clamp(3, 7) as f64;
-            envelope.map(move |u, w| {
-                // u^1.2 gives larger lobes near the base, smaller ones towards the tip.
-                let f = fract(n * u.powf(1.2) + phase);
-                let amp = smoothstep(u / 0.15);
-                w * (1.0 - amp * (1.0 - 0.36) * (1.0 - claw(f, 0.7, 0.8)))
-            })
+            envelope.map(move |u, w| w * acanthus_modulation(n, phase, u))
         }
         LeafShape::Serrated { teeth } => {
             let n = teeth.clamp(4, 80) as f64;
@@ -345,7 +341,15 @@ fn side_profile(p: &LeafParams, sign: f64, half: f64) -> WidthProfile {
             envelope.map(move |u, w| {
                 let f = fract(n * u + phase);
                 let amp = smoothstep(u / 0.04);
-                w * (1.0 - amp * (1.0 - 0.1) * (1.0 - pinna(f)))
+                // Pinnae are longest at about 40 % of the frond and shrink smoothly towards
+                // both ends, on top of the rounded envelope.
+                let d = if u < 0.4 {
+                    (0.4 - u) / 0.4
+                } else {
+                    (u - 0.4) / 0.6
+                };
+                let bell = 1.0 - 0.55 * d * d;
+                bell * w * (1.0 - amp * (1.0 - 0.1) * (1.0 - pinna(f)))
             })
         }
         _ => envelope,
@@ -368,6 +372,117 @@ fn claw(f: f64, xp: f64, c: f64) -> f64 {
     } else {
         let r = (f - xp) / (1.0 - xp);
         (1.0 - r) * (1.0 - r)
+    }
+}
+
+/// Exponent of the acanthus lobe spacing `φ(u) = u^p`: lobes get shorter towards the tip.
+const ACANTHUS_SPACING: f64 = 1.3;
+/// Fraction of a lobe (from its basal sinus) where its crest sits: the long, gently rising
+/// basal flank is the lobe's outer edge and carries the sub-lobes, the short distal flank
+/// drops steeply into the next sinus, so the lobe points towards the leaf tip.
+const ACANTHUS_CREST: f64 = 0.68;
+/// Fraction of a lobe's period at its distal end taken by the rounded sinus.
+const ACANTHUS_GAP: f64 = 0.08;
+
+/// Acanthus width factor at `u` for `n` lobes: big round-topped, forward-pointing lobes
+/// whose outer flank is scalloped into rounded sub-lobes, separated by rounded sinuses that
+/// never cut below ~30 % of the envelope.
+fn acanthus_modulation(n: f64, phase: f64, u: f64) -> f64 {
+    let f = fract(n * u.max(0.0).powf(ACANTHUS_SPACING) + phase);
+    let y = f / (1.0 - ACANTHUS_GAP);
+    let body = lobe_bump(y);
+    // Sinuses are deepest near the base; the last lobes are shallow so the tip stays whole.
+    let floor = lerp(0.3, 0.62, smoothstep((u - 0.5) / 0.45));
+    let raw = floor + (1.0 - floor) * body * (1.0 - 0.13 * sub_notches(sub_lobes(u), y));
+    // Round the bottom of the sinus (a smooth maximum with a slightly raised floor).
+    let k = 0.06;
+    let b = floor + 0.02;
+    let m = 0.5 * (raw + b + ((raw - b) * (raw - b) + k * k).sqrt());
+    lerp(1.0, m.min(1.0), smoothstep(u / 0.12))
+}
+
+/// Sub-lobes per acanthus lobe: three on the big lower lobes, two towards the tip.
+fn sub_lobes(u: f64) -> f64 {
+    if u.max(0.0).powf(ACANTHUS_SPACING) < 0.55 {
+        3.0
+    } else {
+        2.0
+    }
+}
+
+/// Rounded notches between `m` sub-lobes spread along the basal flank `y ∈ [0, crest]`.
+fn sub_notches(m: f64, y: f64) -> f64 {
+    let t = y / ACANTHUS_CREST;
+    (1..m as usize)
+        .map(|k| {
+            let d = (t - k as f64 / m) / 0.09;
+            (-d * d).exp()
+        })
+        .sum()
+}
+
+/// A round-topped lobe on `y ∈ [0, 1]` (zero outside): a convex rise to the crest at
+/// [`ACANTHUS_CREST`], then a quarter ellipse down to the sinus. Both join with zero slope.
+fn lobe_bump(y: f64) -> f64 {
+    if !(0.0..=1.0).contains(&y) {
+        0.0
+    } else if y < ACANTHUS_CREST {
+        let t = 1.0 - y / ACANTHUS_CREST;
+        (1.0 - t * t).powf(0.75)
+    } else {
+        let t = (y - ACANTHUS_CREST) / (1.0 - ACANTHUS_CREST);
+        (1.0 - t * t).max(0.0).sqrt()
+    }
+}
+
+/// One lobe of a lobed leaf half, in arc-length fractions of the midrib.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lobe {
+    /// Basal sinus.
+    pub start: f64,
+    /// Crest (the lobe's tip, where its vein ends).
+    pub crest: f64,
+    /// Distal sinus (may exceed 1 for the last lobe).
+    pub end: f64,
+    /// Crests of the sub-lobes on the outer flank, below the crest.
+    pub subs: Vec<f64>,
+}
+
+impl LeafParams {
+    /// The lobes of one blade half (`side = +1` left, `-1` right) of an acanthus leaf, from
+    /// the base to the tip; empty for other shapes. Lobes whose crest falls outside the
+    /// blade are left out.
+    pub fn lobes(&self, side: f64) -> Vec<Lobe> {
+        let p = self.sanitized();
+        let LeafShape::Acanthus { lobes } = p.shape else {
+            return Vec::new();
+        };
+        let n = lobes.clamp(3, 7) as f64;
+        let phase = if side < 0.0 { 0.5 * p.asymmetry } else { 0.0 };
+        // u where lobe `k` reaches y (lobe-local position, see `acanthus_modulation`).
+        let at = |k: f64, y: f64| {
+            let x = (k + y * (1.0 - ACANTHUS_GAP) - phase).max(0.0) / n;
+            x.powf(1.0 / ACANTHUS_SPACING)
+        };
+        let mut out = Vec::new();
+        for k in -1..(n as i32 + 2) {
+            let k = k as f64;
+            let crest = at(k, ACANTHUS_CREST);
+            if !(0.08..=0.97).contains(&crest) {
+                continue;
+            }
+            let m = sub_lobes(crest);
+            let subs = (0..m as usize - 1)
+                .map(|j| at(k, ACANTHUS_CREST * (j as f64 + 0.55) / m))
+                .collect();
+            out.push(Lobe {
+                start: at(k, 0.0),
+                crest,
+                end: at(k + 1.0, 0.0),
+                subs,
+            });
+        }
+        out
     }
 }
 
@@ -472,24 +587,51 @@ mod tests {
     #[test]
     fn acanthus_has_the_requested_lobes() {
         for lobes in [3, 5, 7] {
-            let l = Leaf::from_base(
-                Point::ZERO,
-                Vec2::new(1.0, 0.0),
-                200.0,
-                120.0,
-                LeafParams::new(LeafShape::Acanthus { lobes }).with_tip_curl(0.0),
-            );
-            let w: Vec<f64> = (0..=2000)
-                .map(|i| l.ribbon().widths_at(i as f64 / 2000.0).0)
-                .collect();
-            let peaks = (1..w.len() - 1)
-                .filter(|&i| w[i] > w[i - 1] && w[i] >= w[i + 1] && w[i] > 2.0)
-                .count();
+            let p = LeafParams::new(LeafShape::Acanthus { lobes }).with_tip_curl(0.0);
+            let l = Leaf::from_base(Point::ZERO, Vec2::new(1.0, 0.0), 200.0, 120.0, p);
+            let w = |u: f64| l.ribbon().widths_at(u).0;
+            let crests: Vec<f64> = p.lobes(1.0).iter().map(|b| b.crest).collect();
             assert!(
-                peaks + 1 >= lobes as usize && peaks <= lobes as usize + 1,
-                "{lobes}: {peaks}"
+                crests.len() + 1 >= lobes as usize && crests.len() <= lobes as usize + 1,
+                "{lobes}: {crests:?}"
             );
+            // Between two lower crests the edge dips into a deep sinus that keeps the blade
+            // whole (lobes get shallower towards the tip).
+            for c in crests.windows(2).filter(|c| c[1] < 0.7) {
+                let sinus = (0..=200)
+                    .map(|i| w(lerp(c[0], c[1], i as f64 / 200.0)))
+                    .fold(f64::MAX, f64::min);
+                let low = w(c[0]).min(w(c[1]));
+                assert!(sinus < 0.65 * low && sinus > 0.2 * low, "{lobes} {c:?}");
+            }
+            // Each crest is (nearly) the widest point of its own lobe.
+            for b in p.lobes(1.0).iter().filter(|b| b.crest < 0.7) {
+                let wc = w(b.crest);
+                assert!(
+                    (0..=50).all(|i| w(lerp(b.start, b.end, i as f64 / 50.0)) <= wc / 0.92),
+                    "{lobes} {b:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn fern_pinnae_are_longest_below_the_middle() {
+        let p = LeafParams::new(LeafShape::Fern { pinnae: 16 }).with_tip_curl(0.0);
+        let l = Leaf::from_base(Point::ZERO, Vec2::new(1.0, 0.0), 100.0, 30.0, p);
+        // Longest pinna per tenth of the frond.
+        let reach: Vec<f64> = (0..10)
+            .map(|k| {
+                (0..40)
+                    .map(|i| l.ribbon().widths_at((k as f64 + i as f64 / 40.0) / 10.0).0)
+                    .fold(0.0, f64::max)
+            })
+            .collect();
+        let best = (0..10)
+            .max_by(|&a, &b| reach[a].total_cmp(&reach[b]))
+            .unwrap();
+        assert!((2..=4).contains(&best), "{reach:?}");
+        assert!(reach[0] < 0.7 * reach[best] && reach[8] < 0.6 * reach[best]);
     }
 
     #[test]

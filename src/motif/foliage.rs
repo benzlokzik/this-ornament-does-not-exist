@@ -9,14 +9,17 @@
 //! - pinnate laterals leaving the midrib at alternating, slightly varying positions and
 //!   angles, running from `(uᵢ, 0)` to `(uᵢ + d, ±0.88)` and bending towards the tip;
 //! - veinlets branching from the laterals of large leaves towards the margin;
-//! - for lobed shapes (acanthus, fern) exactly one vein per lobe or pinna, ending in its tip,
-//!   and for serrated leaves veins ending in the teeth.
+//! - for lobed shapes (acanthus, fern) exactly one vein per lobe or pinna, ending in its tip
+//!   (acanthus lobes also get a veinlet into each sub-lobe), and for serrated leaves veins
+//!   ending in the teeth.
 //!
 //! # Shading
 //! The blade is filled in two tones (a lit half and a shaded half, the "folded" Art Nouveau
-//! leaf), the shaded half carries surface hatching ([`hatch`] with [`Shade::Edge`]) for
-//! volume, and everything is clipped by the outline with the ink outline on top. All
-//! stroke widths are proportional to the leaf length.
+//! leaf), the shaded half darkens towards its margin in a soft tonal band and carries surface
+//! hatching ([`hatch`] with [`Shade::Edge`]) for volume, and everything is clipped by the
+//! outline with the ink outline on top. All stroke widths are proportional to the leaf
+//! length. Where foliage motifs stack leaves, each leaf casts a thin shadow line on the
+//! leaves under it.
 
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::validate::sanitize;
@@ -127,6 +130,14 @@ pub fn leaf_motif<C: Curve>(
         return Node::empty();
     }
     let w = style.widths;
+    // A frond's outline runs round many small pinnae; a full-weight line would clog them.
+    let outline_width = w.outline
+        * len
+        * if matches!(leaf.params().shape, LeafShape::Fern { .. }) {
+            0.6
+        } else {
+            1.0
+        };
     let mut rng = seed.child("leaf-shading").rng();
     // The shaded half alternates with the seed so a cluster of leaves does not look stamped.
     let dark_side = if rng.chance(0.5) { 1.0 } else { -1.0 };
@@ -135,6 +146,16 @@ pub fn leaf_motif<C: Curve>(
     let lit = half_blade(leaf, -dark_side);
     if !lit.elements().is_empty() {
         detail.push(Node::path(lit, Style::fill(style.fill_light)));
+    }
+
+    // A soft tonal band along the shaded edge, darkening towards the margin, under the
+    // hatching: the blade turns away from the light there.
+    let shade = style.fill.mix(style.ink, 0.45);
+    for (v0, opacity) in [(0.5, 0.3), (0.75, 0.35)] {
+        let band = blade_band(leaf, dark_side * v0, dark_side);
+        if !band.elements().is_empty() {
+            detail.push(Node::path(band, Style::fill(shade).with_opacity(opacity)));
+        }
     }
 
     // Hatching on the shaded half, across the blade and slanted towards the tip.
@@ -187,7 +208,7 @@ pub fn leaf_motif<C: Curve>(
         Node::group(detail).clipped(outline.clone()),
         Node::path(
             outline,
-            Style::stroke(style.ink, w.outline * len).with_cap(LineCap::Round),
+            Style::stroke(style.ink, outline_width).with_cap(LineCap::Round),
         ),
     ])
 }
@@ -227,34 +248,27 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
     }];
 
     match p.shape {
-        LeafShape::Acanthus { lobes } => {
-            let n = lobes.clamp(3, 7) as f64;
+        LeafShape::Acanthus { .. } => {
             for side in [1.0, -1.0] {
-                let phase = if side < 0.0 { 0.5 * p.asymmetry } else { 0.0 };
-                // Lobe tips sit where the claw profile peaks: fract(n·u^1.2 + phase) = 0.7.
-                for k in -1..(n as i32 + 1) {
-                    let x = (k as f64 + 0.7 - phase) / n;
-                    if x <= 0.0 {
-                        continue;
-                    }
-                    let ut = x.powf(1.0 / 1.2);
-                    if !(0.1..=0.97).contains(&ut) {
-                        continue;
-                    }
-                    let d = run(leaf, ut, 0.9, 50.0f64.to_radians()).min(0.6 * ut);
-                    let s = (ut - d).max(0.01);
+                // One vein into every lobe, bending with it into its crest, and a veinlet
+                // into each side sub-lobe.
+                for lobe in p.lobes(side) {
+                    // The surface already leans the lobe forward, so a vein of nearly
+                    // constant `u` runs along the lobe's axis.
+                    let ut = lobe.crest;
+                    let s = lerp(ut, lobe.start, 0.45).max(0.01);
                     let q =
-                        QuadBez::new((s, 0.0), (lerp(s, ut, 0.3), side * 0.45), (ut, side * 0.9));
+                        QuadBez::new((s, 0.0), (lerp(s, ut, 0.8), side * 0.35), (ut, side * 0.9));
                     out.push(Vein {
                         uv: q,
                         width: lateral,
                         taper: 1.0,
                     });
-                    // Two side veinlets into the lobe flanks.
-                    for (t0, back) in [(0.45, 0.55), (0.65, 0.3)] {
+                    for (k, &su) in lobe.subs.iter().enumerate() {
+                        let t0 = if k == 0 { 0.3 } else { 0.45 };
                         let a = q.eval(t0);
-                        let e = Point::new(a.x + back * 0.5 * d, side * 0.93);
-                        let c = Point::new(lerp(a.x, e.x, 0.3), lerp(a.y, e.y, 0.6));
+                        let e = Point::new(su, side * 0.84);
+                        let c = Point::new(lerp(a.x, e.x, 0.6), lerp(a.y, e.y, 0.4));
                         out.push(Vein {
                             uv: QuadBez::new(a, c, e),
                             width: veinlet,
@@ -275,9 +289,10 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                     }
                     let s = (uc - 0.25 / n).max(0.0);
                     let q = QuadBez::new((s, 0.0), (uc, side * 0.35), (uc + 0.08 / n, side * 0.85));
+                    // A faint vein along every pinna.
                     out.push(Vein {
                         uv: q,
-                        width: veinlet.max(0.8 * lateral),
+                        width: veinlet.max(0.6 * lateral),
                         taper: 1.0,
                     });
                 }
@@ -397,14 +412,19 @@ fn run<C: Curve>(leaf: &Leaf<C>, u: f64, v: f64, angle: f64) -> f64 {
 
 /// The closed region of the blade between the midrib and the edge `v = side`.
 fn half_blade<C: Curve>(leaf: &Leaf<C>, side: f64) -> BezPath {
+    blade_band(leaf, 0.0, side)
+}
+
+/// The closed region of the blade between the contours `v = a` and `v = b`.
+fn blade_band<C: Curve>(leaf: &Leaf<C>, a: f64, b: f64) -> BezPath {
     const N: usize = 160;
     let mut path = BezPath::new();
-    path.move_to(leaf.point(0.0, 0.0));
+    path.move_to(leaf.point(0.0, a));
     for i in 0..=N {
-        path.line_to(leaf.point(i as f64 / N as f64, side));
+        path.line_to(leaf.point(i as f64 / N as f64, b));
     }
     for i in (0..N).rev() {
-        path.line_to(leaf.point(i as f64 / N as f64, 0.0));
+        path.line_to(leaf.point(i as f64 / N as f64, a));
     }
     path.close_path();
     let p = sanitize(&path, 1e-6);
@@ -599,22 +619,26 @@ pub fn variants(
         out.push((name.to_string(), fit_to_box(node, size, MARGIN)));
     };
 
-    // Acanthus: a large lobed leaf with a strong curl.
+    // Acanthus: a large lobed leaf on an S-curved midrib whose tip curls over.
     {
         let s = seed.child("acanthus");
         let mut rng = s.rng();
-        let lobes = *rng.pick(&[4u32, 5, 6]);
+        let lobes = *rng.pick(&[4u32, 5]);
+        let turn = if rng.chance(0.5) { 1.0 } else { -1.0 };
         let p = LeafParams::new(LeafShape::Acanthus { lobes })
-            .with_tip_curl(rng.jitter(0.75, 0.15) * if rng.chance(0.5) { 1.0 } else { -1.0 })
-            .with_asymmetry(rng.jitter(0.0, 0.5))
-            .jittered(&mut rng, 0.6);
-        let leaf = leaf_at(
+            .with_asymmetry(rng.jitter(0.0, 0.3))
+            .jittered(&mut rng, 0.4)
+            .with_tip_curl(turn * rng.uniform(0.75, 1.0));
+        let d = Vec2::from_angle(-PI / 2.0 + rng.jitter(0.0, 0.25));
+        let n = Vec2::new(-d.y, d.x) * turn;
+        // The lower midrib bows against the curl, the upper part with it: an S.
+        let midrib = Composite::new(vec![CubicBez::new(
             Point::ZERO,
-            Vec2::from_angle(-PI / 2.0 + rng.jitter(0.0, 0.4)),
-            l,
-            l * rng.uniform(0.5, 0.6),
-            p,
-        );
+            Point::ZERO + d * (0.35 * l) - n * (0.1 * l),
+            Point::ZERO + d * (0.7 * l) - n * (0.02 * l),
+            Point::ZERO + d * l + n * (0.06 * l),
+        )]);
+        let leaf = Leaf::new(midrib, p.with_aspect(rng.uniform(0.62, 0.72)));
         let style = LeafStyle::from_palette(palette, false, rng.uniform(0.2, 0.5));
         add("acanthus", leaf_motif(&s, &leaf, &style, acc));
     }
@@ -731,6 +755,7 @@ pub fn variants(
             style.ink,
             acc,
         )]);
+        let mut leaves = Vec::new();
         for (i, side) in [1.0, -1.0].into_iter().enumerate() {
             let t = twig.eval(0.55 + 0.25 * i as f64);
             let a = -PI / 2.0 + side * rng.jitter(0.75, 0.15);
@@ -738,7 +763,14 @@ pub fn variants(
                 .with_tip_curl(-side * rng.uniform(0.2, 0.5))
                 .jittered(&mut rng, 0.4);
             let leaf = leaf_at(t, Vec2::from_angle(a), 0.65 * l, 0.17 * l, p);
-            g.push(leaf_motif(&s.index(i as u64), &leaf, &style, acc));
+            leaves.push(Stacked::new(
+                &leaf,
+                leaf_motif(&s.index(i as u64), &leaf, &style, acc),
+                acc,
+            ));
+        }
+        for n in stack_with_shadows(leaves, style.ink) {
+            g.push(n);
         }
         add("laurel-pair", g);
     }
@@ -768,22 +800,25 @@ fn willow_sprig(seed: &SeedTree, palette: &Palette, l: f64, acc: f64) -> Node {
         style.ink,
         acc,
     )];
-    let n = 9;
+    let n = 15;
     for i in 0..n {
-        let u = lerp(0.12, 0.97, i as f64 / (n - 1) as f64);
-        let t = al.t_at_fraction(u);
+        let u = lerp(0.08, 0.97, i as f64 / (n - 1) as f64) + rng.jitter(0.0, 0.015);
+        let t = al.t_at_fraction(u.clamp(0.0, 1.0));
         let side = if i % 2 == 0 { 1.0 } else { -1.0 };
         let tg = twig.tangent(t);
         let nrm = Vec2::new(-tg.y, tg.x);
         let width_here = 0.5 * lerp(w0, 0.35 * w0, u);
         let base = twig.point(t) + nrm * (side * width_here);
-        let a = side * rng.jitter(0.5, 0.12);
+        // Alternate leaves at varied angles, the lower ones spreading wider.
+        let a = side * rng.uniform(0.3, 0.75) * lerp(1.15, 0.75, u);
         let dir = rotate(tg, a);
-        let len = l * lerp(0.42, 0.22, u) * rng.uniform(0.9, 1.1);
+        let len = l * lerp(0.42, 0.2, u) * rng.uniform(0.85, 1.12);
         let p = LeafParams::new(LeafShape::Willow)
-            .with_tip_curl(side * rng.uniform(0.1, 0.5))
+            .with_tip_curl(
+                side * rng.uniform(0.05, 0.55) * if rng.chance(0.8) { 1.0 } else { -1.0 },
+            )
             .jittered(&mut rng, 0.4);
-        let leaf = leaf_at(base, dir, len, 0.12 * len, p);
+        let leaf = leaf_at(base, dir, len, 0.16 * len * rng.uniform(0.9, 1.1), p);
         let st = LeafStyle::from_palette(palette, false, rng.uniform(0.25, 0.65));
         nodes.push(leaf_motif(&seed.index(i), &leaf, &st, acc));
     }
@@ -845,10 +880,60 @@ fn ivy_cluster(seed: &SeedTree, palette: &Palette, l: f64, acc: f64) -> Node {
             st.ink,
             acc,
         ));
-        leaves.push(leaf_motif(&seed.index(i as u64), &leaf, &st, acc));
+        leaves.push(Stacked::new(
+            &leaf,
+            leaf_motif(&seed.index(i as u64), &leaf, &st, acc),
+            acc,
+        ));
     }
-    stalks.extend(leaves);
+    stalks.extend(stack_with_shadows(leaves, palette.ink));
     Node::group(stalks)
+}
+
+/// A drawn leaf with the outline used to cast and receive overlap shadows.
+struct Stacked {
+    node: Node,
+    outline: BezPath,
+    length: f64,
+}
+
+impl Stacked {
+    fn new<C: Curve>(leaf: &Leaf<C>, node: Node, acc: f64) -> Stacked {
+        Stacked {
+            node,
+            outline: sanitize(&leaf.outline(acc), MIN_SEG),
+            length: leaf.length(),
+        }
+    }
+}
+
+/// Leaves in drawing order; before each leaf, a thin dark line along its outline (offset
+/// down and to the right, away from the light) is drawn on every leaf already under it,
+/// clipped to that leaf, so overlapping leaves read as stacked.
+fn stack_with_shadows(leaves: Vec<Stacked>, ink: Color) -> Vec<Node> {
+    use kurbo::Shape;
+    let mut out = Vec::new();
+    for (j, top) in leaves.iter().enumerate() {
+        let len = top.length;
+        if top.outline.elements().len() > 2 && len.is_finite() && len > 1e-6 {
+            let mut cast = top.outline.clone();
+            cast.apply_affine(Affine::translate(Vec2::new(0.012, 0.016) * len));
+            let bb = cast.bounding_box();
+            let style = Style::stroke(ink, 0.03 * len)
+                .with_cap(LineCap::Round)
+                .with_opacity(0.4);
+            for under in &leaves[..j] {
+                if under.outline.elements().len() < 3
+                    || bb.intersect(under.outline.bounding_box()).area() <= 0.0
+                {
+                    continue;
+                }
+                out.push(Node::path(cast.clone(), style.clone()).clipped(under.outline.clone()));
+            }
+        }
+        out.push(top.node.clone());
+    }
+    out
 }
 
 /// Rotate `v` by `angle` radians.
@@ -903,6 +988,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stacked_leaves_cast_clipped_shadows_on_the_ones_below() {
+        let st = LeafStyle::from_palette(&pal(), false, 0.5);
+        let mk = |x: f64| {
+            let leaf = leaf_at(
+                Point::new(x, 0.0),
+                Vec2::new(0.0, -1.0),
+                100.0,
+                50.0,
+                LeafParams::new(LeafShape::Ovate),
+            );
+            Stacked::new(&leaf, leaf_motif(&SeedTree::new(1), &leaf, &st, 0.2), 0.2)
+        };
+        // Overlapping pair: one shadow before the top leaf; far apart: none.
+        assert_eq!(stack_with_shadows(vec![mk(0.0), mk(20.0)], st.ink).len(), 3);
+        assert_eq!(
+            stack_with_shadows(vec![mk(0.0), mk(500.0)], st.ink).len(),
+            2
+        );
     }
 
     #[test]
