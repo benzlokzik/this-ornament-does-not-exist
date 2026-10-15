@@ -13,6 +13,9 @@
 
 ## Previews
 
+> [!TIP]
+> MORE PREVIES ARE AVAILABLE IN [previews/README.md](previews/README.md)
+
 | `botanica` (seed 42) | `bloom` (seed 7, `moonlit`) | `ribbons` (seed 3, `ember`) |
 | --- | --- | --- |
 | ![botanica preset](previews/botanica.png) | ![bloom preset](previews/bloom.png) | ![ribbons preset](previews/ribbons.png) |
@@ -27,6 +30,10 @@ orna generate --seed 7 --preset bloom --palette moonlit --single --output previe
 orna generate --seed 3 --preset ribbons --palette ember --single --output previews/ribbons.png
 orna gallery --seed 42 --width 1200 --single --output previews/gallery.png
 ```
+
+### Option matrix
+
+[previews/README.md](previews/README.md) shows every discrete combination of the `generate` flags at seed 7 as a table: the five palettes across, and `botanica` with and without the opening, at density 1 and 2.5, `bloom` and `ribbons` down.
 
 ## Architecture
 
