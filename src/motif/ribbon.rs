@@ -1023,7 +1023,6 @@ fn banner(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         stripes: 2,
         notch: rng.uniform(2.0, 2.6),
         lit_side: coin(&mut rng),
-        folds: fold_sites(&curve, &profile, 1),
         ..RibbonParams::symmetric(profile)
     };
     sh.ribbon("banner", seed, curve, &params, &style).0
@@ -1141,7 +1140,6 @@ fn scroll(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let params = RibbonParams {
         stripes: 2,
         lit_side: if cw { 1.0 } else { -1.0 },
-        folds: fold_sites(&curve, &profile, 1),
         ..RibbonParams::symmetric(profile)
     };
     let node = sh.ribbon("scroll", seed, curve, &params, &style).0;
