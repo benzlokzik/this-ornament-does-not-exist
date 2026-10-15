@@ -1,0 +1,54 @@
+name: Dependabot auto-merge
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  auto-merge:
+    name: Auto-merge safe Dependabot updates
+    runs-on: ubuntu-latest
+
+    if: >
+      github.event.pull_request.user.login == 'dependabot[bot]'
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve safe updates
+        if: >
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          (
+            steps.meta.outputs.update-type == 'version-update:semver-minor' &&
+            steps.meta.outputs.dependency-type == 'direct:development'
+          )
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for safe updates
+        if: >
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          (
+            steps.meta.outputs.update-type == 'version-update:semver-minor' &&
+            steps.meta.outputs.dependency-type == 'direct:development'
+          )
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
