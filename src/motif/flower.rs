@@ -163,11 +163,12 @@ impl Petal {
         let b = p.base_width * w;
         let wave = |half: f64| {
             (p.profile == PetalProfile::Fringed).then(|| {
-                let cycles = ((2.0 * half / l) * 6.0).round().clamp(1.0, 7.0) + 3.0;
+                let cycles = ((2.0 * half / l) * 3.0).clamp(0.5, 4.0) + 1.5;
                 Wave {
-                    amp: 0.05 * (2.0 * half).min(l),
+                    amp: 0.06 * (2.0 * half).min(l),
                     cycles,
-                    start: 0.55,
+                    start: 0.5,
+                    phase: 7.3 * p.asymmetry + 3.1 * p.curl,
                 }
             })
         };
@@ -284,14 +285,17 @@ impl Surface for Petal {
     }
 }
 
-/// Smooth sinusoidal modulation of an edge along its outward normal.
+/// Smooth, slightly irregular modulation of an edge along its outward normal: two
+/// incommensurate sinusoids under a slowly varying amplitude, so the fringe reads as
+/// hand-drawn lobes rather than a sawtooth.
 #[derive(Debug, Clone, Copy)]
 struct Wave {
     amp: f64,
-    /// Whole number of periods between `start` and the tip, so the wave vanishes at the tip
-    /// and both edges still meet.
+    /// Periods of the main sinusoid between `start` and the tip.
     cycles: f64,
     start: f64,
+    /// Per-petal phase so neighbouring petals never share the same crests.
+    phase: f64,
 }
 
 /// One petal edge in the flat frame: a profile drawn on the `+x` side, optionally waved and
@@ -320,19 +324,24 @@ impl Edge {
         self.wave.map_or(1e-12, |w| w.amp.max(1e-12))
     }
 
-    /// Ripple displacement along the outward normal; zero without a wave. The phase runs
-    /// over `[start, 1]` with a whole number of periods so it vanishes at both ends, and a
-    /// smoothstep envelope fades it in.
+    /// Ripple displacement along the outward normal; zero without a wave. A smoothstep
+    /// envelope fades the wave in after `start` and out again just before the tip, so both
+    /// edges still meet there; the wave itself is `sin(x) + 0.35 sin(2.17x + φ)` under a
+    /// slow amplitude swell, which breaks the regularity of a plain sinusoid.
     fn ripple(&self, t: f64) -> Vec2 {
         let Some(w) = self.wave else {
             return Vec2::ZERO;
         };
         let t = finite_or(t, 0.0).clamp(0.0, 1.0);
         let phase = ((t - w.start) / (1.0 - w.start)).max(0.0);
-        let env = smoothstep(unlerp(w.start, w.start + 0.2 * (1.0 - w.start), t));
+        let env = smoothstep(unlerp(w.start, w.start + 0.25 * (1.0 - w.start), t))
+            * smoothstep(unlerp(1.0, 0.94, t));
+        let x = TAU * w.cycles * phase + w.phase;
+        let shape = x.sin() + 0.35 * (2.17 * x + 0.7 * w.phase).sin();
+        let swell = 1.0 - 0.3 * (0.37 * x + 1.9 * w.phase).sin();
         let tg = self.curve.tangent(t);
         // Right-hand normal of an edge running base → tip on the +x side points outward.
-        let out = Vec2::new(tg.y, -tg.x) * (w.amp * env * (TAU * w.cycles * phase).sin());
+        let out = Vec2::new(tg.y, -tg.x) * (w.amp * env * shape * swell / 1.35);
         if self.mirror {
             Vec2::new(-out.x, out.y)
         } else {

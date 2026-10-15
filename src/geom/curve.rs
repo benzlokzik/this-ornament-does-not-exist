@@ -51,7 +51,7 @@ pub trait Curve {
     /// Unit left normal (tangent rotated by +90°, i.e. `(-ty, tx)`).
     fn normal(&self, t: f64) -> Vec2 {
         let tg = self.tangent(t);
-        Vec2::new(-tg.y, tg.x)
+        Vec2::new(0.0 - tg.y, tg.x)
     }
 
     /// Signed curvature `κ = (x'y'' − y'x'') / |P'|³`. Default: finite differences on `deriv`.
