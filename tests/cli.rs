@@ -141,3 +141,83 @@ fn unsupported_output_extension_fails() {
     assert!(String::from_utf8_lossy(&out.stderr).contains(".svg or .png"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn generate_writes_artwork_and_a_config_that_reproduces_it() {
+    let dir = temp_dir("generate");
+    let png = dir.join("a.png");
+    let out = ok(&[
+        "generate",
+        "--seed",
+        "5",
+        "--preset",
+        "botanica",
+        "--width",
+        "400",
+        "--height",
+        "600",
+        "--detail",
+        "0.3",
+        "--save-config",
+        "--output",
+        path_str(&png),
+    ]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let (svg, json) = (dir.join("a.svg"), dir.join("a.json"));
+    for p in [&png, &svg, &json] {
+        assert!(stdout.contains(path_str(p)), "{stdout}");
+    }
+    assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
+    let first = std::fs::read(&svg).unwrap();
+    assert!(first.starts_with(b"<svg"));
+
+    let text = std::fs::read_to_string(&json).unwrap();
+    let cfg: orna::config::Config = serde_json::from_str(&text).expect("config parses");
+    assert_eq!(cfg.seed, 5);
+    assert_eq!((cfg.width, cfg.height, cfg.detail), (400.0, 600.0, 0.3));
+    assert_eq!(cfg.preset, orna::config::Preset::Botanica);
+    let again: orna::config::Config =
+        serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+    assert_eq!(cfg, again);
+
+    let svg2 = dir.join("b.svg");
+    ok(&[
+        "generate",
+        "--config",
+        path_str(&json),
+        "--single",
+        "--output",
+        path_str(&svg2),
+    ]);
+    assert!(
+        std::fs::read(&svg2).unwrap() == first,
+        "the saved config does not reproduce the SVG"
+    );
+    assert!(!dir.join("b.png").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn generate_builds_the_other_presets() {
+    let dir = temp_dir("presets");
+    for preset in ["bloom", "ribbons"] {
+        let svg = dir.join(format!("{preset}.svg"));
+        ok(&[
+            "generate",
+            "--preset",
+            preset,
+            "--width",
+            "300",
+            "--height",
+            "450",
+            "--detail",
+            "0.3",
+            "--single",
+            "--output",
+            path_str(&svg),
+        ]);
+        let text = std::fs::read_to_string(&svg).unwrap();
+        assert!(text.starts_with("<svg") && text.len() > 1000, "{preset}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
