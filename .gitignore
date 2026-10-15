@@ -82,3 +82,8 @@ target/
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Generated artworks (only previews/ is committed)
+/out/
+/*.png
+/*.svg

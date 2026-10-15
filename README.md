@@ -2,6 +2,23 @@
 
 `orna` is a purely procedural, seed-based engine for Art Nouveau botanical illustrations. It draws ribbons, spirals, engraved flowers, foliage and plants from mathematical curves, decorates them with shape-aware hatching and stippling, composes them, and writes SVG and PNG. No images, models or training data are involved: a seed and a few parameters fully determine the artwork.
 
+## Previews
+
+| `botanica` (seed 42) | `bloom` (seed 7, `moonlit`) | `ribbons` (seed 3, `ember`) |
+| --- | --- | --- |
+| ![botanica preset](previews/botanica.png) | ![bloom preset](previews/bloom.png) | ![ribbons preset](previews/ribbons.png) |
+
+![Gallery sheet](previews/gallery.png)
+
+The images in `previews/` come from these commands:
+
+```shell
+orna generate --seed 42 --preset botanica --single --output previews/botanica.png
+orna generate --seed 7 --preset bloom --palette moonlit --single --output previews/bloom.png
+orna generate --seed 3 --preset ribbons --palette ember --single --output previews/ribbons.png
+orna gallery --seed 42 --width 1200 --single --output previews/gallery.png
+```
+
 ## Architecture
 
 Five layers, each depending only on the ones above it:
