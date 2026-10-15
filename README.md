@@ -16,9 +16,13 @@
 > [!TIP]
 > MORE PREVIES ARE AVAILABLE IN [previews/README.md](previews/README.md)
 
-| `botanica` (seed 42) | `bloom` (seed 7, `moonlit`) | `ribbons` (seed 3, `ember`) |
-| --- | --- | --- |
-| ![botanica preset](previews/botanica.png) | ![bloom preset](previews/bloom.png) | ![ribbons preset](previews/ribbons.png) |
+| `botanica` (seed 42) | `botanica`, `nocturne`, open landscape, bloom field (seed 42) |
+| --- | --- |
+| ![botanica preset](previews/botanica.png) | ![botanica nocturne blooms](previews/botanica-nocturne-blooms.png) |
+
+| `bloom` (seed 7, `moonlit`) | `ribbons` (seed 3, `ember`) |
+| --- | --- |
+| ![bloom preset](previews/bloom.png) | ![ribbons preset](previews/ribbons.png) |
 
 ![Gallery sheet](previews/gallery.png)
 
@@ -26,6 +30,7 @@ The images in `previews/` come from these commands:
 
 ```shell
 orna generate --seed 42 --preset botanica --single --output previews/botanica.png
+orna generate --seed 42 --preset botanica --palette nocturne --landscape open --background blooms --single --output previews/botanica-nocturne-blooms.png
 orna generate --seed 7 --preset bloom --palette moonlit --single --output previews/bloom.png
 orna generate --seed 3 --preset ribbons --palette ember --single --output previews/ribbons.png
 orna gallery --seed 42 --width 1200 --single --output previews/gallery.png
@@ -33,7 +38,7 @@ orna gallery --seed 42 --width 1200 --single --output previews/gallery.png
 
 ### Option matrix
 
-[previews/README.md](previews/README.md) shows every discrete combination of the `generate` flags at seed 7 as a table: the five palettes across, and `botanica` with and without the opening, at density 1 and 2.5, `bloom` and `ribbons` down.
+[previews/README.md](previews/README.md) shows every discrete combination of the `generate` flags at seed 7 as tables: the six palettes across; every `--landscape` × `--background` combination of `botanica`, `botanica` at density 2.5, `bloom` and `ribbons` down; and one gallery sheet per palette.
 
 ## Architecture
 
@@ -55,7 +60,7 @@ Run the binary with `pixi run cargo run --release -- <command>`, or use `target/
 
 ### `orna gallery`
 
-Renders a demonstration sheet: sections of ribbons, spirals, flowers, foliage, plants and one swatch per palette, laid out as a grid of square tiles. The column count follows from `--width` (tiles stay at least 240 units wide), sections without items are left out, and the sheet grows taller than `--height` when the tiles need it.
+Renders a demonstration sheet: sections of ribbons, spirals, scrolls, flowers, foliage, plants and one swatch per palette, laid out as a grid of square tiles. The column count follows from `--width` (tiles stay at least 240 units wide), sections without items are left out, and the sheet grows taller than `--height` when the tiles need it.
 
 ```sh
 orna gallery --seed 42 --output out/gallery.svg
@@ -95,22 +100,25 @@ orna generate --config out/a.json --output out/again.png
 | `--height <HEIGHT>` | `1800` | Canvas height |
 | `--palette <PALETTE>` | `botanica` | Palette name (see `orna palettes`) |
 | `--detail <DETAIL>` | `1` | Detail multiplier in `(0, 10]`: scales the path budget (55 000 paths at 1), the amount of background foliage and the branching of plants |
+| `--density <DENSITY>` | `1` | Multiplier in `[0, 4]` of the number of filler elements (background ornament, vine flowers, plant branching) |
+| `--landscape <MODE>` | `open` | `botanica` only: `open` paints the moonlit landscape across the cool region with no frame, `window` frames it in a circular or arched opening, `none` leaves it out |
+| `--background <FILL>` | `dense` | `botanica` only: `dense` covers the free space with overlapping scrolls, leaves and small flowers, `blooms` fills it with 25–60 flowers of varied species and hues, `sprigs` scatters sparse sprigs of leaves along the flow |
 | `--scale <SCALE>` | `1` | PNG scale factor relative to the SVG size |
 | `--config <CONFIG>` | none | JSON config to load; flags given explicitly override its fields |
 | `--save-config` | off | Also write the effective config as `<name>.json` |
 | `--single` | off | Write only the format of `--output` |
 
-Two options exist only in the JSON config: `opening` (default `true`) shows the moonlit opening of the botanica preset, and `density` (default `1`, range `[0, 4]`) multiplies the number of filler elements (background foliage, small flowers). Configs without them load with the defaults.
+The JSON config carries the same options as fields (`landscape`, `background`, `density`, `detail`, …); configs written before an option existed load with its default.
 
 Presets:
 
-- `botanica`: a poster split by an S-shaped divider band into a warm region (magenta, rose, plum) and a cool one (blue, sage, lavender); the warm side lands left or right by seed. Large focal flowers sit on collars of leaves at the centres of two counter-rotating vortices. Ribbons follow the longest streamlines of that field and roll into spiral tails, thin vines with leaves and small flowers follow the shorter ones, plants grow from the bottom edge, and dim background foliage fills the gaps that are left. A moonlit window (moon, stars, hills, framed by a wreath of leaves) opens in the upper cool region.
+- `botanica`: a poster split by an S-shaped divider band into a warm region (magenta, rose, plum) and a cool one (blue, sage, lavender); the warm side lands left or right by seed. Large focal flowers sit on collars of leaves at the centres of two counter-rotating vortices. Ribbons follow the longest streamlines of that field and roll into spiral tails, thin vines with leaves and small flowers follow the shorter ones, and plants grow from the bottom edge. Behind everything a moonlit landscape (night sky, moon with halo, stars, engraved clouds, layered hills, shaded orbs, crystal cliffs on the warm side) is painted across the cool region, and the remaining ground is covered with overlapping acanthus scrolls, leaves and small flowers so no bare paper shows; `--landscape` and `--background` switch both (see the option matrix).
 - `bloom`: one large flower of a random species on a collar of leaves and a leafy stem, between two scroll ribbons, one warm and one cool.
 - `ribbons`: ribbons and spirals only: the divider band and ribbons along the field's streamlines, warm on one side of the divider and cool on the other.
 
 ### `orna palettes`
 
-Lists the built-in palettes (`botanica`, `moonlit`, `ember`, `verdigris`, `plum-mist`) with their background, ink, warm and cool colours.
+Lists the built-in palettes (`botanica`, `moonlit`, `ember`, `verdigris`, `plum-mist`, `nocturne`) with their background, ink, warm and cool colours. `nocturne` is the dark one: deep plum ground, crimson and indigo motifs, pale ink.
 
 ## Determinism
 
