@@ -5,7 +5,7 @@ Rust crate `orna`, managed via [Cargo.toml](Cargo.toml): a purely procedural, se
 ## Project context
 
 - Library `orna` ([src/lib.rs](src/lib.rs)) plus binary `orna` ([src/main.rs](src/main.rs)) with `gallery`, `generate` and `palettes` subcommands
-- Core stack: `kurbo` for geometry, `svg` for SVG output, `resvg` for PNG rasterisation, `rand` + `rand_chacha` for seeded RNG, `noise` for fields, `clap` for the CLI, `serde`/`serde_json` for config, `rayon` for parallelism, `anyhow`/`thiserror` for errors
+- Core stack: `kurbo` for geometry, `svg` for SVG output, `resvg` for PNG rasterisation, `rand` + `rand_chacha` for seeded RNG, `noise` for fields, `palette` for perceptual (Oklab) colour mixing, `clap` for the CLI, `serde`/`serde_json` for config, `rayon` for parallelism, `anyhow`/`thiserror` for errors
 - Main code layout, one layer per module; each layer depends only on the layers above it:
   - `src/geom/` contains mathematical geometry: the `Curve` trait, spirals, ribbons, leaves, surfaces, fitting, validation
   - `src/motif/` contains drawable motifs built from geometry (ribbons, spirals, flowers, foliage, plants) that return scene `Node`s

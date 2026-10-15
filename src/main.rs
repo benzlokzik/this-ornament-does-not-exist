@@ -62,6 +62,12 @@ enum Command {
         /// Global detail multiplier.
         #[arg(long, default_value_t = 1.0)]
         detail: f64,
+        /// Motif density multiplier for the presets.
+        #[arg(long, default_value_t = 1.0)]
+        density: f64,
+        /// Leave out the moonlit opening (botanica preset).
+        #[arg(long)]
+        no_opening: bool,
         /// PNG scale factor relative to the SVG size.
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
@@ -108,6 +114,8 @@ fn main() -> anyhow::Result<()> {
             height,
             palette,
             detail,
+            density,
+            no_opening,
             scale,
             config,
             save_config,
@@ -145,6 +153,12 @@ fn main() -> anyhow::Result<()> {
             }
             if given("--detail") {
                 cfg.detail = detail;
+            }
+            if given("--density") {
+                cfg.density = density;
+            }
+            if no_opening {
+                cfg.opening = false;
             }
             cfg.validate()?;
             let scene = orna::compose::generate(&cfg).with_context(|| {

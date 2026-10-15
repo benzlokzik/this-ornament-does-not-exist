@@ -1,3 +1,4 @@
+use palette::{FromColor, Mix, Oklab, Oklch, Srgb};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -79,33 +80,64 @@ impl Color {
         self
     }
 
-    /// Mix towards `other` by `t` in `[0,1]`.
-    pub fn mix(self, other: Color, t: f64) -> Color {
-        let t = t.clamp(0.0, 1.0);
+    fn to_oklab(self) -> Oklab<f64> {
+        Oklab::from_color(Srgb::new(
+            self.r.clamp(0.0, 1.0),
+            self.g.clamp(0.0, 1.0),
+            self.b.clamp(0.0, 1.0),
+        ))
+    }
+
+    fn from_oklab(lab: Oklab<f64>, a: f64) -> Color {
+        let rgb: Srgb<f64> = Srgb::from_color(lab);
         Color::rgba(
-            self.r + (other.r - self.r) * t,
-            self.g + (other.g - self.g) * t,
-            self.b + (other.b - self.b) * t,
-            self.a + (other.a - self.a) * t,
+            rgb.red.clamp(0.0, 1.0),
+            rgb.green.clamp(0.0, 1.0),
+            rgb.blue.clamp(0.0, 1.0),
+            a,
         )
     }
 
-    /// Lighten (`t > 0`) or darken (`t < 0`) in HSL space.
+    fn map_oklch(self, f: impl FnOnce(&mut Oklch<f64>)) -> Color {
+        let mut lch = Oklch::from_color(self.to_oklab());
+        f(&mut lch);
+        lch.l = lch.l.clamp(0.0, 1.0);
+        lch.chroma = lch.chroma.max(0.0);
+        Color::from_oklab(Oklab::from_color(lch), self.a)
+    }
+
+    /// Mix towards `other` by `t` in `[0,1]`, perceptually (Oklab), so warm/cool blends
+    /// pass through clean mid tones instead of muddy ones.
+    pub fn mix(self, other: Color, t: f64) -> Color {
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        // Exact endpoints: the Oklab round trip would otherwise perturb the last bits.
+        if t <= 0.0 {
+            return self;
+        }
+        if t >= 1.0 {
+            return other;
+        }
+        let lab = self.to_oklab().mix(other.to_oklab(), t);
+        Color::from_oklab(lab, self.a + (other.a - self.a) * t)
+    }
+
+    /// Lighten (`t > 0`) or darken (`t < 0`) by shifting Oklch lightness.
     pub fn lighten(self, t: f64) -> Color {
-        let (h, s, l) = self.to_hsl();
-        Color::hsl(h, s, (l + t).clamp(0.0, 1.0)).with_alpha(self.a)
+        self.map_oklch(|c| c.l += t)
     }
 
-    /// Scale saturation by `k` in HSL space.
+    /// Scale chroma (Oklch) by `k`.
     pub fn saturate(self, k: f64) -> Color {
-        let (h, s, l) = self.to_hsl();
-        Color::hsl(h, (s * k).clamp(0.0, 1.0), l).with_alpha(self.a)
+        self.map_oklch(|c| c.chroma *= k.max(0.0))
     }
 
-    /// Rotate hue by `deg`.
+    /// Rotate hue by `deg` (Oklch).
     pub fn rotate_hue(self, deg: f64) -> Color {
-        let (h, s, l) = self.to_hsl();
-        Color::hsl(h + deg, s, l).with_alpha(self.a)
+        self.map_oklch(|c| c.hue += deg)
     }
 
     /// `#rrggbb` (alpha is exported separately as opacity).
@@ -209,6 +241,21 @@ mod tests {
         let c = Color::hex("#7a1f4c").unwrap();
         assert_eq!(c.to_hex(), "#7a1f4c");
         assert!(Color::hex("zzz").is_none());
+    }
+
+    #[test]
+    fn oklab_mix_keeps_mid_tones_clean() {
+        let warm = Color::hex("#b83a5e").unwrap();
+        let cool = Color::hex("#4c6a8a").unwrap();
+        let mid = warm.mix(cool, 0.5);
+        let l = |c: Color| Oklch::from_color(c.to_oklab()).l;
+        // a perceptual mix sits between the two lightnesses rather than dropping below both
+        assert!(l(mid) >= l(warm).min(l(cool)) - 1e-6 && l(mid) <= l(warm).max(l(cool)) + 1e-6);
+        assert_eq!(warm.mix(cool, 0.0).to_hex(), warm.to_hex());
+        assert_eq!(warm.mix(cool, 1.0).to_hex(), cool.to_hex());
+        assert!(warm.lighten(0.2).to_hsl().2 > warm.to_hsl().2);
+        assert!(warm.saturate(0.0).to_hsl().1 < 0.02);
+        assert!(warm.mix(cool, f64::NAN).r.is_finite());
     }
 
     #[test]

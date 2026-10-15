@@ -7,10 +7,12 @@
 Five layers, each depending only on the ones above it:
 
 1. `src/geom/`: geometry: the `Curve` trait, spirals, ribbons, leaves, surfaces, curve fitting and validation.
-2. `src/motif/`: drawable motifs built from geometry (ribbons, spirals, flowers, foliage, plants) that return scene nodes.
+2. `src/motif/`: drawable motifs built from geometry and ornament (ribbons, spirals, flowers, foliage, plants) that return scene nodes.
 3. `src/ornament/`: shape-aware ornamentation (contours, hatching, stippling) in surface parameter space.
 4. `src/compose/`: composition and procedural growth: vector fields, masks, placement, presets and the demonstration gallery.
 5. `src/render/`: SVG export and PNG rasterisation (via `resvg`).
+
+Built on `kurbo` (curves), `svg` (document), `resvg` (raster), `rand_chacha` (seeded streams), `noise` (fields), `palette` (Oklab colour mixing), `clap` (CLI) and `serde` (config).
 
 Shared pieces: `src/scene/` (the scene graph: `Node`, `Scene`, `Style`, `Color`), `src/config.rs` (the serialisable `Config`), `src/palette.rs` (built-in palettes), `src/rng.rs` (`SeedTree` random streams).
 
