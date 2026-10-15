@@ -12,3 +12,4 @@ Rust crate `orna`, managed via [Cargo.toml](Cargo.toml).
 
 - Add Rust dependencies in [Cargo.toml](Cargo.toml), tool dependencies in [pixi.toml](pixi.toml). Commit [Cargo.lock](Cargo.lock) and [pixi.lock](pixi.lock).
 - Keep edits minimal and run fmt, clippy and tests before handing work back.
+- Commit regularly: one Conventional Commit per finished, compiling step (a module, a fix, a doc change). Don't batch a whole milestone into one commit.
