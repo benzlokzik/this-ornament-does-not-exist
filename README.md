@@ -1,5 +1,14 @@
 # orna
 
+[![SAST CI](https://github.com/benzlokzik/this-ornament-does-not-exist/actions/workflows/sast.yml/badge.svg)](https://github.com/benzlokzik/this-ornament-does-not-exist/actions/workflows/sast.yml)
+[![Rust 2024](https://img.shields.io/badge/rust-edition%202024-000000?logo=rust)](Cargo.toml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL%20v3-blue)](./LICENSE)
+[![Pixi](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json)](https://pixi.sh)
+[![Conventional Commits](https://img.shields.io/badge/commits-conventional-FE5196?logo=conventionalcommits)](https://www.conventionalcommits.org)
+[![prek hooks](https://img.shields.io/badge/hooks-prek-FAB040?logo=pre-commit&logoColor=black)](https://github.com/j178/prek)
+[![Dependabot](https://img.shields.io/badge/dependabot-enabled-025E8C?logo=dependabot)](.github/dependabot.yml)
+[![Last commit](https://img.shields.io/github/last-commit/benzlokzik/this-ornament-does-not-exist)](https://github.com/benzlokzik/this-ornament-does-not-exist/commits/main)
+
 `orna` is a purely procedural, seed-based engine for Art Nouveau botanical illustrations. It draws ribbons, spirals, engraved flowers, foliage and plants from mathematical curves, decorates them with shape-aware hatching and stippling, composes them, and writes SVG and PNG. No images, models or training data are involved: a seed and a few parameters fully determine the artwork.
 
 ## Previews
