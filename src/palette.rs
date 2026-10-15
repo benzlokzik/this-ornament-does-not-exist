@@ -38,6 +38,19 @@ impl Palette {
     pub fn by_name(name: &str) -> Option<Palette> {
         all().into_iter().find(|p| p.name == name)
     }
+
+    /// `true` when the background is dark (Oklab lightness below 0.5), so lines drawn on
+    /// it need a pale ink.
+    pub fn is_dark(&self) -> bool {
+        self.background.lightness() < 0.5
+    }
+
+    /// Set the ink to `pale` on a dark background and to `dark` on a light one.
+    fn with_ink(mut self, dark: &str, pale: &str) -> Palette {
+        let ink = if self.is_dark() { pale } else { dark };
+        self.ink = Color::hex(ink).expect("valid hex");
+        self
+    }
 }
 
 fn ramp(colors: &[Color], t: f64) -> Color {
@@ -67,34 +80,35 @@ pub fn all() -> Vec<Palette> {
             ink: Color::hex("#2a1530").unwrap(),
             light: Color::hex("#f7ecdf").unwrap(),
             warm: hexes(&[
-                "#5a1032", "#8c1d4a", "#b83a5e", "#d9708a", "#e9a9a8", "#f0cdbf",
+                "#5a1032", "#90134a", "#c12a5b", "#e46688", "#f1a5a4", "#f4ccbc",
             ]),
             cool: hexes(&[
-                "#1f1b4a", "#2f3f6f", "#4c6a8a", "#6f8f9d", "#9db7ad", "#c7d6c2",
+                "#1f1b4a", "#2e3e72", "#476a8f", "#6990a1", "#99b8ac", "#c6d7c0",
             ]),
         },
         Palette {
             name: "moonlit".into(),
             background: Color::hex("#1b1a33").unwrap(),
-            ink: Color::hex("#d9d2e6").unwrap(),
+            ink: Color::BLACK,
             light: Color::hex("#ece9f3").unwrap(),
             warm: hexes(&[
-                "#4a2144", "#7b3a6a", "#a85f8c", "#c99ab6", "#e3c4d6", "#f3e3ea",
+                "#4a2144", "#7e376c", "#ae5a8e", "#cf96b8", "#e7c2d8", "#f5e2ea",
             ]),
             cool: hexes(&[
-                "#1d2c52", "#2d4a7a", "#4b6f9b", "#7b9db8", "#a9c3cf", "#d5e3e4",
+                "#1d2c52", "#2a4a7e", "#456fa2", "#749ebe", "#a4c4d2", "#d3e3e5",
             ]),
-        },
+        }
+        .with_ink("#1b1a33", "#d9d2e6"),
         Palette {
             name: "ember".into(),
             background: Color::hex("#f4e3c9").unwrap(),
             ink: Color::hex("#3a1a0e").unwrap(),
             light: Color::hex("#fbf1e0").unwrap(),
             warm: hexes(&[
-                "#5e1a12", "#9a2f1c", "#c9552b", "#e38a4f", "#f0b57f", "#f6d6ad",
+                "#5e1a12", "#9e2813", "#d34b10", "#ee8335", "#f8b26f", "#fad5a5",
             ]),
             cool: hexes(&[
-                "#2f3b2a", "#4c5f3b", "#728a52", "#9eab73", "#c2c89b", "#dfe0c0",
+                "#2f3b2a", "#4b6038", "#708b4a", "#9dac68", "#c2c992", "#dfe0bb",
             ]),
         },
         Palette {
@@ -103,10 +117,10 @@ pub fn all() -> Vec<Palette> {
             ink: Color::hex("#14231f").unwrap(),
             light: Color::hex("#f8f9f1").unwrap(),
             warm: hexes(&[
-                "#6b3a2a", "#9c5a3c", "#c48a5a", "#dcb27e", "#eacfa6", "#f3e3c6",
+                "#6b3a2a", "#9f5837", "#ca874e", "#e2b070", "#eece9c", "#f5e3c1",
             ]),
             cool: hexes(&[
-                "#163c3a", "#1f5f5a", "#2e867c", "#5aa79b", "#8fc6b9", "#c0ded5",
+                "#163c3a", "#16605b", "#11887d", "#47aa9c", "#85c8b9", "#bcdfd5",
             ]),
         },
         Palette {
@@ -115,12 +129,29 @@ pub fn all() -> Vec<Palette> {
             ink: Color::hex("#241a2e").unwrap(),
             light: Color::hex("#f6f1f8").unwrap(),
             warm: hexes(&[
-                "#4b1d3f", "#7a2d5e", "#a4487e", "#c977a1", "#e0a7c1", "#efd0df",
+                "#4b1d3f", "#7d295f", "#ab3f80", "#d26fa3", "#e7a3c2", "#f2cee0",
             ]),
             cool: hexes(&[
-                "#2b2d5a", "#444a86", "#6670a8", "#8b97c3", "#b1bbd9", "#d3daea",
+                "#2b2d5a", "#43498a", "#646faf", "#8896cb", "#afbbdf", "#d2daec",
             ]),
         },
+        // Deep and saturated, after the reference: wine, crimson and magenta to blush on the
+        // warm side, midnight indigo, violet and slate to sage on the cool side, over
+        // plum-indigo. Its background is dark, so the ink is the pale one (a near-black
+        // violet ink lets outlines vanish into the ground).
+        Palette {
+            name: "nocturne".into(),
+            background: Color::hex("#21163a").unwrap(),
+            ink: Color::BLACK,
+            light: Color::hex("#f3e6cf").unwrap(),
+            warm: hexes(&[
+                "#3f0a26", "#6e1233", "#a01d3c", "#b02f72", "#d97a8c", "#f1c0b4",
+            ]),
+            cool: hexes(&[
+                "#1a1846", "#33286e", "#5a4a8e", "#5d7290", "#8eab92", "#c6dcbe",
+            ]),
+        }
+        .with_ink("#140c1f", "#e9dcc8"),
     ]
 }
 
@@ -138,6 +169,23 @@ mod tests {
         }
         let names: std::collections::HashSet<_> = ps.iter().map(|p| p.name.clone()).collect();
         assert_eq!(names.len(), ps.len());
+    }
+
+    #[test]
+    fn ramps_run_dark_to_light_and_dark_palettes_get_pale_ink() {
+        for p in all() {
+            for ramp in [&p.warm, &p.cool] {
+                let l: Vec<f64> = ramp.iter().map(|c| c.lightness()).collect();
+                assert!(l.windows(2).all(|w| w[0] < w[1]), "{}: {l:?}", p.name);
+            }
+            let dark = matches!(p.name.as_str(), "moonlit" | "nocturne");
+            assert_eq!(p.is_dark(), dark, "{}", p.name);
+            // Ink contrasts with the background either way.
+            let gap = (p.ink.lightness() - p.background.lightness()).abs();
+            assert!(gap > 0.5, "{}: ink/background gap {gap}", p.name);
+        }
+        let n = Palette::by_name("nocturne").unwrap();
+        assert!(n.background.lightness() < 0.3 && n.light.lightness() > 0.9);
     }
 
     #[test]

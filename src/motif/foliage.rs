@@ -28,7 +28,7 @@ use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp};
 use crate::ornament::{Detail, HatchOptions, Shade, hatch};
 use crate::palette::Palette;
 use crate::rng::{Draw, SeedTree};
-use crate::scene::{Color, LineCap, Node, Style};
+use crate::scene::{Color, LineCap, Node, Paint, Style};
 use kurbo::{Affine, BezPath, CubicBez, ParamCurve, Point, QuadBez, Vec2};
 use std::f64::consts::PI;
 
@@ -262,7 +262,10 @@ pub fn leaf_motif_with_detail<C: Curve>(
     }
 
     Node::group(vec![
-        Node::path(outline.clone(), Style::fill(style.fill)),
+        Node::path(
+            outline.clone(),
+            Style::fill(style.fill).with_fill_paint(Paint::tonal(style.fill, 0.0)),
+        ),
         Node::group(detail).clipped(outline.clone()),
         Node::path(
             outline,

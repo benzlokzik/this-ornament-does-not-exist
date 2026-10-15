@@ -24,7 +24,7 @@ use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp, smoothstep
 use crate::ornament::Detail;
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
-use crate::scene::{Color, Node, Style};
+use crate::scene::{Color, Node, Paint, Style};
 use kurbo::{Affine, BezPath, Circle, CubicBez, ParamCurve, PathEl, Point, QuadBez, Shape, Vec2};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -985,7 +985,10 @@ fn petal_with_detail(
         .copied()
         .collect();
     let node = Node::group(vec![
-        Node::path(outline.clone(), Style::fill(fill)),
+        Node::path(
+            outline.clone(),
+            Style::fill(fill).with_fill_paint(Paint::tonal(fill, 90.0)),
+        ),
         Node::group(detail).clipped(outline.clone()),
         // A rippled margin already reads as busy; a lighter line keeps it delicate.
         Node::path(edges, Style::stroke(style.ink, ink_w * size)),
