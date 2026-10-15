@@ -3,7 +3,7 @@ name = "orna"
 version = "0.1.0"
 edition = "2024"
 description = "Procedural Art Nouveau botanical illustration engine"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 
 [lib]
 name = "orna"

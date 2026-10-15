@@ -53,4 +53,4 @@ Rust crate `orna`, managed via [Cargo.toml](Cargo.toml): a purely procedural, se
 
 - Do not commit API keys, private keys or credentials; the `detect-private-key` hook is a backstop, not a policy
 - Do not commit generated artworks, `target/` or `.pixi/` environments
-- The crate is licensed GPL-3.0-or-later; only add dependencies with compatible licenses
+- The crate is licensed AGPL-3.0-or-later; only add dependencies with compatible licenses
