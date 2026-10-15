@@ -4,6 +4,7 @@
 pub mod botanica;
 pub mod field;
 pub mod gallery;
+pub mod ground;
 pub mod landscape;
 pub mod layout;
 pub mod preset;

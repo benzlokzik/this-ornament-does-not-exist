@@ -28,7 +28,8 @@ use super::field::{
     Band, Combine, Constant, Field, FnMask, FocalPoint, Mask, along_curve, focal_mask,
     place_points, trace,
 };
-use super::landscape::{Opening, WindowShape, opening_node};
+use super::ground;
+use super::landscape::{Opening, WindowShape, open_landscape, opening_node};
 use super::layout::{
     Canvas, Layer, Layers, Occupancy, flower_style, leaf_style, muted_leaf, plant_style,
     ribbon_style,
@@ -39,6 +40,7 @@ use super::preset::{
     scroll_ribbon, select_guides, with_tails,
 };
 use crate::config::Config;
+use crate::config::{Background, Landscape};
 use crate::geom::leaf::{LeafParams, LeafShape};
 use crate::geom::{Composite, Curve, CurveExt, lerp, smoothstep};
 use crate::motif::flower::FlowerStyle;
@@ -107,7 +109,7 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
     let mut occ = Occupancy::new();
 
     // 1. Opening and foci.
-    let opening = config.opening.then(|| {
+    let opening = (config.landscape == Landscape::Window).then(|| {
         let r0 = (0.2 * w).min(0.125 * h);
         let y = 0.045 * h + r0;
         let dx = (0..=8)
@@ -537,26 +539,67 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
         layers.add(Layer::Foreground, g);
     }
 
-    // The opening.
-    if let Some(o) = &opening {
-        layers.add(
-            Layer::Opening,
-            opening_node(&seed.child("opening"), o, palette, acc),
-        );
+    // The landscape: framed window, or painted openly across the cool region.
+    match config.landscape {
+        Landscape::Window => {
+            if let Some(o) = &opening {
+                layers.add(
+                    Layer::Opening,
+                    opening_node(&seed.child("opening"), o, palette, acc),
+                );
+            }
+        }
+        Landscape::Open => {
+            layers.add(
+                Layer::Landscape,
+                open_landscape(&seed.child("landscape"), &canvas, palette, fill, acc),
+            );
+        }
+        Landscape::None => {}
     }
 
-    // 7. Background foliage flowing along the ornament.
-    background_foliage(
-        &seed,
-        &canvas,
-        palette,
-        &field,
-        &foci,
-        &occ,
-        fill,
-        acc,
-        &mut layers,
-    );
+    // 7. Background fill: dense ornament ground, a bloom field, or sparse sprigs.
+    match config.background {
+        Background::Dense => {
+            layers.add(
+                Layer::BackFoliage,
+                ground::dense_ground(
+                    &seed.child("ground"),
+                    &canvas,
+                    palette,
+                    &field,
+                    &occ,
+                    fill,
+                    acc,
+                ),
+            );
+        }
+        Background::Blooms => {
+            layers.add(
+                Layer::BackFoliage,
+                ground::bloom_field(
+                    &seed.child("blooms"),
+                    &canvas,
+                    palette,
+                    &field,
+                    &occ,
+                    fill,
+                    acc,
+                ),
+            );
+        }
+        Background::Sprigs => background_foliage(
+            &seed,
+            &canvas,
+            palette,
+            &field,
+            &foci,
+            &occ,
+            fill,
+            acc,
+            &mut layers,
+        ),
+    }
     (canvas, layers)
 }
 
@@ -762,6 +805,7 @@ mod tests {
     fn back_leaves(seed: u64) -> usize {
         let config = Config {
             seed,
+            background: Background::Sprigs,
             ..Config::default()
         };
         let palette = Palette::by_name("botanica").unwrap();

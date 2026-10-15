@@ -33,7 +33,7 @@ use crate::ornament::contour::{band, line_strips};
 use crate::ornament::fit_clean;
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
-use crate::scene::{Color, LineCap, Node, Style};
+use crate::scene::{Color, LineCap, Node, Paint, Style};
 use kurbo::{Affine, BezPath, Circle, CubicBez, Point, Shape, Vec2};
 use std::f64::consts::PI;
 
@@ -471,7 +471,10 @@ pub fn ribbon_layers<S: Surface + ?Sized>(
         return root;
     }
     let frac = |k: f64| finite_or(k, 0.0).max(0.0);
-    root.push(Node::path(outline.clone(), Style::fill(style.fill)));
+    root.push(Node::path(
+        outline.clone(),
+        Style::fill(style.fill).with_fill_paint(Paint::tonal(style.fill, -60.0)),
+    ));
 
     let folds = fold_spans(&params.folds);
     let tone = Tone::new(surface, params.lit_side, wmax, &folds);

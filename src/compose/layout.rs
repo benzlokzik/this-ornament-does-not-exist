@@ -15,7 +15,7 @@ use crate::motif::plant::PlantStyle;
 use crate::motif::ribbon::RibbonStyle;
 use crate::palette::Palette;
 use crate::rng::{Draw, SeedTree};
-use crate::scene::{Color, Node};
+use crate::scene::{Color, Node, Paint};
 use kurbo::{Affine, BezPath, Point, Rect, Vec2};
 
 /// The canvas of a full-scene composition and its warm/cool split.
@@ -183,6 +183,8 @@ impl Budget {
 pub enum Layer {
     /// Tonal background shapes.
     Background,
+    /// The open landscape (sky, moon, hills) painted across the cool region.
+    Landscape,
     /// Dim, low-contrast foliage filling the gaps.
     BackFoliage,
     /// The moonlit opening and its frame.
@@ -197,8 +199,9 @@ pub enum Layer {
     Foreground,
 }
 
-const LAYERS: [(Layer, &str); 7] = [
+const LAYERS: [(Layer, &str); 8] = [
     (Layer::Background, "background"),
+    (Layer::Landscape, "landscape"),
     (Layer::BackFoliage, "back-foliage"),
     (Layer::Opening, "opening"),
     (Layer::Ribbons, "ribbons"),
@@ -428,6 +431,85 @@ pub fn plant_style(palette: &Palette, warm: bool) -> PlantStyle {
     }
 }
 
+/// `c` with its hue rotated by `deg` degrees (Oklch); exactly `c` for 0 or a non-finite
+/// shift, so unshifted colours keep their last bits.
+fn hue(c: Color, deg: f64) -> Color {
+    if deg == 0.0 || !deg.is_finite() {
+        c
+    } else {
+        c.rotate_hue(deg)
+    }
+}
+
+/// [`ramp`] with the hue rotated by `shift` degrees, for several hues per region.
+pub fn ramp_shifted(palette: &Palette, warm: bool, t: f64, shift: f64) -> Color {
+    hue(ramp(palette, warm, t), shift)
+}
+
+/// A tone for warmth `warm ∈ [0, 1]` (0 = cool ramp, 1 = warm ramp, blended between) at
+/// ramp position `t` (dark → light), its hue rotated by `shift` degrees.
+pub fn region_tone(palette: &Palette, warm: f64, t: f64, shift: f64) -> Color {
+    let k = 1.0
+        - if warm.is_finite() {
+            warm.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+    hue(palette.warm_at(t).mix(palette.cool_at(t), k), shift)
+}
+
+/// [`flower_style`] with the petal and vein hues rotated by `shift` degrees (the centre
+/// keeps its contrasting colour).
+pub fn flower_style_shifted(palette: &Palette, w: f64, t: f64, shift: f64) -> FlowerStyle {
+    let s = flower_style(palette, w, t);
+    FlowerStyle {
+        petal: hue(s.petal, shift),
+        petal_light: hue(s.petal_light, shift),
+        vein: hue(s.vein, shift),
+        ..s
+    }
+}
+
+/// [`leaf_style`] with the blade and vein hues rotated by `shift` degrees.
+pub fn leaf_style_shifted(palette: &Palette, w: f64, t: f64, shift: f64) -> LeafStyle {
+    let s = leaf_style(palette, w, t);
+    LeafStyle {
+        fill: hue(s.fill, shift),
+        fill_light: hue(s.fill_light, shift),
+        vein: hue(s.vein, shift),
+        ..s
+    }
+}
+
+/// [`ribbon_style`] with the body, highlight, stripe and shade hues rotated by `shift`
+/// degrees.
+pub fn ribbon_style_shifted(palette: &Palette, w: f64, t: f64, shift: f64) -> RibbonStyle {
+    let s = ribbon_style(palette, w, t);
+    RibbonStyle {
+        fill: hue(s.fill, shift),
+        highlight: hue(s.highlight, shift),
+        stripe: hue(s.stripe, shift),
+        shade: hue(s.shade, shift),
+        ..s
+    }
+}
+
+/// The tonal gradient of a motif filled with `base`, after the reference: dark at the
+/// bottom of its bounding box, light at the top, the hue drifting along the way — warm
+/// shapes from wine to rose, cool ones from indigo towards sage. Equal bases give equal
+/// paints, which the SVG export writes once.
+pub fn shade_paint(base: Color, warm: bool) -> Paint {
+    let (dark_hue, light_hue) = if warm { (-6.0, 8.0) } else { (8.0, -24.0) };
+    Paint::linear(
+        (0.5, 1.0),
+        (0.5, 0.0),
+        [
+            (0.0, base.lighten(-0.12).rotate_hue(dark_hue)),
+            (1.0, base.lighten(0.12).rotate_hue(light_hue)),
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +556,47 @@ mod tests {
         assert_eq!(m.at(Point::new(50.0, 50.0)), 0.0);
         assert_eq!(m.at(Point::new(90.0, 90.0)), 1.0);
         assert!(o.contains(Point::new(55.0, 50.0)));
+    }
+
+    #[test]
+    fn hue_shifts_and_region_tones() {
+        let p = Palette::by_name("nocturne").unwrap();
+        // Zero shift is exactly the unshifted helpers.
+        assert_eq!(
+            flower_style_shifted(&p, 0.7, 0.4, 0.0),
+            flower_style(&p, 0.7, 0.4)
+        );
+        assert_eq!(
+            leaf_style_shifted(&p, 0.2, 0.4, 0.0),
+            leaf_style(&p, 0.2, 0.4)
+        );
+        let r = ribbon_style(&p, 1.0, 0.5);
+        let rs = ribbon_style_shifted(&p, 1.0, 0.5, 0.0);
+        assert_eq!((rs.fill, rs.shade), (r.fill, r.shade));
+        assert_eq!(ramp_shifted(&p, true, 0.3, 0.0), ramp(&p, true, 0.3));
+        assert_eq!(region_tone(&p, 1.0, 0.3, 0.0), p.warm_at(0.3));
+        assert_eq!(region_tone(&p, 0.0, 0.3, 0.0), p.cool_at(0.3));
+        // A shift moves the petal hue and keeps the centre and ink.
+        let a = flower_style(&p, 1.0, 0.5);
+        let b = flower_style_shifted(&p, 1.0, 0.5, 25.0);
+        assert_ne!(a.petal, b.petal);
+        assert_eq!((a.center, a.ink), (b.center, b.ink));
+        // Only the hue moves: the tone stays (up to sRGB gamut clipping).
+        assert!((b.petal.lightness() - a.petal.lightness()).abs() < 0.05);
+    }
+
+    #[test]
+    fn shade_paint_is_dark_below_and_light_above() {
+        let p = Palette::by_name("nocturne").unwrap();
+        for warm in [true, false] {
+            let base = ramp(&p, warm, 0.5);
+            let Paint::Linear(g) = shade_paint(base, warm) else {
+                panic!("shade_paint is linear");
+            };
+            assert!(g.start.y > g.end.y, "dark end at the bottom");
+            let (d, l) = (g.stops[0].1, g.stops[1].1);
+            assert!(d.lightness() < base.lightness() && base.lightness() < l.lightness());
+            assert_eq!(shade_paint(base, warm), shade_paint(base, warm));
+        }
     }
 }

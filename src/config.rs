@@ -28,16 +28,41 @@ pub struct Config {
     pub detail: f64,
     /// Curve fitting / flattening accuracy in canvas units.
     pub accuracy: f64,
-    /// Show the moonlit opening in the cool region (botanica preset).
-    #[serde(default = "default_opening")]
-    pub opening: bool,
+    /// How the moonlit landscape is drawn (botanica preset).
+    #[serde(default)]
+    pub landscape: Landscape,
+    /// How the free background is filled (botanica preset).
+    #[serde(default)]
+    pub background: Background,
     /// Multiplier of the number of filler elements (background foliage, small flowers).
     #[serde(default = "default_density")]
     pub density: f64,
 }
 
-fn default_opening() -> bool {
-    true
+/// Landscape mode of the botanica preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Landscape {
+    /// Sky, moon, clouds and hills painted across the cool region, overlapped by the ornament.
+    #[default]
+    Open,
+    /// The landscape inside a framed circular or arched window.
+    Window,
+    /// No landscape.
+    None,
+}
+
+/// Background fill of the botanica preset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum Background {
+    /// Overlapping scrolls, leaves and flowers so no bare paper shows.
+    #[default]
+    Dense,
+    /// A field of flowers of varied species and hues over the free space.
+    Blooms,
+    /// Sparse sprigs of leaves along the flow.
+    Sprigs,
 }
 
 fn default_density() -> f64 {
@@ -54,7 +79,8 @@ impl Default for Config {
             palette: "botanica".into(),
             detail: 1.0,
             accuracy: 0.05,
-            opening: default_opening(),
+            landscape: Landscape::default(),
+            background: Background::default(),
             density: default_density(),
         }
     }
@@ -113,7 +139,8 @@ mod tests {
     #[test]
     fn json_roundtrip_of_preset_options() {
         let c = Config {
-            opening: false,
+            landscape: Landscape::None,
+            background: Background::Blooms,
             density: 1.5,
             preset: Preset::Ribbons,
             ..Default::default()
@@ -127,7 +154,8 @@ mod tests {
     fn older_configs_get_preset_option_defaults() {
         let s = r#"{"seed":1,"width":600.0,"height":900.0,"preset":"bloom","palette":"botanica","detail":1.0,"accuracy":0.05}"#;
         let c: Config = serde_json::from_str(s).unwrap();
-        assert!(c.opening);
+        assert_eq!(c.landscape, Landscape::Open);
+        assert_eq!(c.background, Background::Dense);
         assert_eq!(c.density, 1.0);
     }
 

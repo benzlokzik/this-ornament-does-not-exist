@@ -2,7 +2,7 @@
 
 use kurbo::{Affine, BezPath, Rect, Shape};
 use orna::render::{render_png, to_svg_string};
-use orna::scene::{Color, Node, Scene, Style};
+use orna::scene::{Color, GradientUnits, Node, Paint, Scene, Style};
 use resvg::{tiny_skia, usvg};
 use std::time::Instant;
 
@@ -175,4 +175,131 @@ fn large_scene_renders_quickly() {
     let elapsed = t.elapsed();
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     eprintln!("2000x2000, 2000 paths: {elapsed:?}");
+}
+
+/// A 100×20 canvas filled edge to edge by a rectangle painted with `paint`.
+fn painted_rect(paint: Paint) -> Scene {
+    let mut s = Scene::new(100.0, 20.0).with_background(BG);
+    s.push(Node::path(
+        rect(0.0, 0.0, 100.0, 20.0),
+        Style::fill_gradient(paint),
+    ));
+    s
+}
+
+fn luma(p: [u8; 4]) -> u32 {
+    p[0] as u32 + p[1] as u32 + p[2] as u32
+}
+
+fn to_color(p: [u8; 4]) -> Color {
+    Color::rgb(
+        p[0] as f64 / 255.0,
+        p[1] as f64 / 255.0,
+        p[2] as f64 / 255.0,
+    )
+}
+
+#[test]
+fn shade_gradient_renders_dark_to_light() {
+    let base = Color::hex("#8c1d4a").unwrap();
+    let s = painted_rect(Paint::shade(base, 0.15, 0.2, 0.0));
+    let svg = to_svg_string(&s);
+    assert!(svg.contains("<linearGradient"), "{svg}");
+    usvg::Tree::from_str(&svg, &usvg::Options::default()).expect("usvg parses gradients");
+    let pm = decode(&render_png(&s, 1.0).unwrap());
+    let (l, m, r) = (rgba(&pm, 1, 10), rgba(&pm, 50, 10), rgba(&pm, 98, 10));
+    assert!(luma(l) < luma(m) && luma(m) < luma(r), "{l:?} {m:?} {r:?}");
+    // The ends are the darkened and lightened base colours.
+    let close = |a: Color, b: Color| {
+        (a.r - b.r).abs() < 0.04 && (a.g - b.g).abs() < 0.04 && (a.b - b.b).abs() < 0.04
+    };
+    assert!(close(to_color(l), base.lighten(-0.15)), "{l:?}");
+    assert!(close(to_color(r), base.lighten(0.2)), "{r:?}");
+
+    // Radial: light centre, dark rim.
+    let s = painted_rect(Paint::radial(
+        (0.5, 0.5),
+        0.5,
+        [(0.0, Color::WHITE), (1.0, Color::BLACK)],
+    ));
+    let pm = decode(&render_png(&s, 1.0).unwrap());
+    assert!(luma(rgba(&pm, 50, 10)) > luma(rgba(&pm, 97, 10)) + 200);
+}
+
+#[test]
+fn bbox_gradient_follows_transformed_group() {
+    // A 10×10 local square shaded black → white left to right, placed by
+    // translate(40, 0)·scale(2) at world x 40..60. A bounding-box gradient must span the
+    // drawn square, not the canvas or the untransformed coordinates.
+    let green = Color::rgb(0.0, 1.0, 0.0);
+    let square = |paint: Paint| {
+        let mut s = Scene::new(100.0, 20.0).with_background(green);
+        s.push(
+            Node::path(rect(0.0, 0.0, 10.0, 10.0), Style::fill_gradient(paint))
+                .with_transform(Affine::translate((40.0, 0.0)) * Affine::scale(2.0)),
+        );
+        s
+    };
+    let stops = [(0.0, Color::BLACK), (1.0, Color::WHITE)];
+    let pm =
+        decode(&render_png(&square(Paint::linear((0.0, 0.0), (1.0, 0.0), stops)), 1.0).unwrap());
+    let (l, m, r) = (rgba(&pm, 41, 10), rgba(&pm, 50, 10), rgba(&pm, 58, 10));
+    assert!(luma(l) < 60, "left end dark: {l:?}");
+    assert!(luma(r) > 3 * 255 - 100, "right end light: {r:?}");
+    assert!((250..520).contains(&luma(m)), "middle grey: {m:?}");
+    assert_eq!(
+        rgba(&pm, 30, 10),
+        [0, 255, 0, 255],
+        "background left of the square"
+    );
+    assert_eq!(
+        rgba(&pm, 70, 10),
+        [0, 255, 0, 255],
+        "background right of the square"
+    );
+
+    // User-space units are the path's local space: 0..10 local spans the square.
+    let user = Paint::linear((0.0, 0.0), (10.0, 0.0), stops).with_units(GradientUnits::UserSpace);
+    let s = square(user);
+    let svg = to_svg_string(&s);
+    assert!(svg.contains(r#"gradientUnits="userSpaceOnUse""#), "{svg}");
+    let pm = decode(&render_png(&s, 1.0).unwrap());
+    assert!(luma(rgba(&pm, 41, 10)) < 60, "{:?}", rgba(&pm, 41, 10));
+    assert!(
+        luma(rgba(&pm, 58, 10)) > 3 * 255 - 100,
+        "{:?}",
+        rgba(&pm, 58, 10)
+    );
+}
+
+#[test]
+fn equal_gradients_share_one_def() {
+    let a = Color::hex("#5a1032").unwrap();
+    let b = Color::hex("#4c6a8a").unwrap();
+    let mut s = Scene::new(100.0, 100.0);
+    // Two paths with equal (separately built) paints, one with another paint, and a stroke
+    // with the first paint again.
+    for i in 0..2 {
+        let x = 10.0 * i as f64;
+        s.push(Node::path(
+            rect(x, 0.0, x + 8.0, 8.0),
+            Style::fill_gradient(Paint::shade(a, 0.1, 0.1, -90.0)),
+        ));
+    }
+    s.push(Node::path(
+        rect(50.0, 50.0, 60.0, 60.0),
+        Style::fill_gradient(Paint::shade(b, 0.1, 0.1, -90.0)),
+    ));
+    s.push(Node::path(
+        rect(70.0, 70.0, 80.0, 80.0),
+        Style::stroke(Color::BLACK, 2.0).with_stroke_paint(Paint::shade(a, 0.1, 0.1, -90.0)),
+    ));
+    let svg = to_svg_string(&s);
+    assert_eq!(svg.matches("<linearGradient").count(), 2, "{svg}");
+    assert_eq!(svg.matches(r##"fill="url(#g0)""##).count(), 2, "{svg}");
+    assert_eq!(svg.matches(r##"fill="url(#g1)""##).count(), 1, "{svg}");
+    assert_eq!(svg.matches(r##"stroke="url(#g0)""##).count(), 1, "{svg}");
+    assert!(svg.find(r#"id="g0""#) < svg.find(r#"id="g1""#), "{svg}");
+    assert_eq!(svg, to_svg_string(&s.clone()), "byte-deterministic");
+    usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
 }
