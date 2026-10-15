@@ -76,7 +76,7 @@ pub fn all() -> Vec<Palette> {
         Palette {
             name: "moonlit".into(),
             background: Color::hex("#1b1a33").unwrap(),
-            ink: Color::hex("#0b0a1a").unwrap(),
+            ink: Color::hex("#d9d2e6").unwrap(),
             light: Color::hex("#ece9f3").unwrap(),
             warm: hexes(&[
                 "#4a2144", "#7b3a6a", "#a85f8c", "#c99ab6", "#e3c4d6", "#f3e3ea",
