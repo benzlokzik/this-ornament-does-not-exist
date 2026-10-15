@@ -31,7 +31,8 @@
 
 use super::flower::{self, FlowerParams, FlowerStyle};
 use super::foliage::{
-    LeafStyle, finite_or, fit_to_box, leaf_at, leaf_motif, rotate, sane_accuracy, stalk, tapered,
+    LeafStyle, finite_or, fit_to_box, leaf_at, leaf_motif_with_detail, rotate, sane_accuracy,
+    stalk, tapered,
 };
 use crate::geom::curl::{organic_curve, whiplash};
 use crate::geom::fit::fit_curve;
@@ -40,6 +41,7 @@ use crate::geom::ribbon::{Ribbon, WidthProfile};
 use crate::geom::spiral::spiral_tail;
 use crate::geom::validate::{path_is_finite, sanitize};
 use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp};
+use crate::ornament::Detail;
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
 use crate::scene::{Color, LineCap, Node, Style};
@@ -49,6 +51,8 @@ use std::f64::consts::{PI, TAU};
 
 /// Fitting tolerance of the light band along a stem, as a fraction of the stem width.
 const BAND_TOLERANCE: f64 = 0.02;
+/// Stems narrower than this on the canvas (base width, pixels) have no light band.
+const LOD_BAND: f64 = 3.0;
 
 /// Deepest branching level grown, whatever the parameters ask for.
 pub const MAX_LEVELS: usize = 5;
@@ -1000,9 +1004,20 @@ fn tendril(
 
 /// Draw a plant: deeper stems first, then tendrils, leaves, buds and flowers on top.
 pub fn plant_node(plant: &Plant, style: &PlantStyle, accuracy: f64) -> Node {
+    plant_node_with_detail(plant, style, accuracy, Detail::FULL)
+}
+
+/// [`plant_node`] at a level of detail: leaves, buds and flowers that are small on the
+/// canvas leave out their finest engraving, and hairline stems their light band.
+pub fn plant_node_with_detail(
+    plant: &Plant,
+    style: &PlantStyle,
+    accuracy: f64,
+    detail: Detail,
+) -> Node {
     let acc = sane_accuracy(accuracy);
     let mut layers = Layers::default();
-    collect(&plant.root, style, acc, &mut layers);
+    collect(&plant.root, style, acc, detail, &mut layers);
     let mut root = Node::empty().with_id("plant");
     layers
         .stems
@@ -1052,11 +1067,12 @@ struct Layers {
     tops: Vec<(f64, Node)>,
 }
 
-fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
-    out.stems.push((stem.level, stem_node(stem, style, acc)));
+fn collect(stem: &Stem, style: &PlantStyle, acc: f64, detail: Detail, out: &mut Layers) {
+    out.stems
+        .push((stem.level, stem_node(stem, style, acc, detail)));
     for a in &stem.children {
         match a {
-            Attachment::Branch { stem, .. } => collect(stem, style, acc, out),
+            Attachment::Branch { stem, .. } => collect(stem, style, acc, detail, out),
             Attachment::Leaf {
                 leaf,
                 petiole,
@@ -1070,7 +1086,7 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
                     let w = (0.6 * stem.half_width(1.0)).max(0.01 * leaf.length());
                     g.push(stalk(pc, 2.0 * w, 1.4 * w, style.stem, style.ink, acc));
                 }
-                g.push(leaf_motif(seed, leaf, &ls, acc));
+                g.push(leaf_motif_with_detail(seed, leaf, &ls, acc, detail));
                 out.leaves.push((stem.level, g));
             }
             Attachment::Tendril { curve, width } => {
@@ -1101,9 +1117,21 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
                     let d = rotate(tg, a);
                     let sp = LeafParams::new(LeafShape::Lanceolate).with_tip_curl(0.3 * a);
                     let sepal = leaf_at(c - tg * (0.2 * r), d, 0.75 * r, 0.24 * r, sp);
-                    g.push(leaf_motif(&seed.index(k as u64), &sepal, &ls, acc));
+                    g.push(leaf_motif_with_detail(
+                        &seed.index(k as u64),
+                        &sepal,
+                        &ls,
+                        acc,
+                        detail,
+                    ));
                 }
-                let fl = flower::flower(seed, params, &fs, acc / scale.max(1e-9));
+                let fl = flower::flower_with_detail(
+                    seed,
+                    params,
+                    &fs,
+                    acc / scale.max(1e-9),
+                    detail.scaled(*scale),
+                );
                 // A tilted flower is foreshortened along the stem: seen partly from the side.
                 let squash = finite_or(*tilt, 0.0).clamp(0.0, 1.3).cos();
                 g.push(fl.with_transform(
@@ -1122,15 +1150,17 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
                 seed,
             } => {
                 let (c, tg) = stem.frame(*u);
-                out.tops
-                    .push((-1.0, bud_node(seed, c, tg, *size, *tone, style, acc)));
+                out.tops.push((
+                    -1.0,
+                    bud_node(seed, c, tg, *size, *tone, style, acc, detail),
+                ));
             }
         }
     }
 }
 
 /// A stem as a tapered ribbon with an ink outline and a highlight along one side.
-fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
+fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64, detail: Detail) -> Node {
     let w0 = stem.width;
     if !(w0.is_finite() && w0 > 1e-9) {
         return Node::empty();
@@ -1152,6 +1182,13 @@ fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
         -1.0
     };
     let tol = acc.max(BAND_TOLERANCE * w0);
+    if detail.canvas_size(2.0 * w0) < LOD_BAND {
+        g.push(Node::path(
+            outline,
+            Style::stroke(style.ink, 0.22 * w0).with_cap(LineCap::Round),
+        ));
+        return g;
+    }
     let mut band = fit_curve(&FnCurve(|u: f64| ribbon.point(u, lit * 0.12)), tol);
     let back = fit_curve(&FnCurve(|u: f64| ribbon.point(1.0 - u, lit * 0.62)), tol);
     for el in back.elements() {
@@ -1270,6 +1307,7 @@ fn crozier(
 }
 
 /// A closed bud: a pointed ovate body in flower colours held by two sepals.
+#[allow(clippy::too_many_arguments)]
 fn bud_node(
     seed: &SeedTree,
     c: Point,
@@ -1278,6 +1316,7 @@ fn bud_node(
     tone: f64,
     style: &PlantStyle,
     acc: f64,
+    detail: Detail,
 ) -> Node {
     let fs = style.flower_at(tone);
     let body_style = LeafStyle {
@@ -1291,13 +1330,25 @@ fn bud_node(
         .with_points(0.2, 0.9)
         .with_tip_curl(0.0);
     let body = leaf_at(c - tg * (0.05 * size), tg, size, 0.55 * size, bp);
-    let mut g = Node::group(vec![leaf_motif(seed, &body, &body_style, acc)]);
+    let mut g = Node::group(vec![leaf_motif_with_detail(
+        seed,
+        &body,
+        &body_style,
+        acc,
+        detail,
+    )]);
     let ls = style.leaf_at(0.3);
     for (k, side) in [1.0, -1.0].into_iter().enumerate() {
         let sp = LeafParams::new(LeafShape::Lanceolate).with_tip_curl(-side * 0.25);
         let d = rotate(tg, side * 0.22);
         let sepal = leaf_at(c - tg * (0.08 * size), d, 0.7 * size, 0.28 * size, sp);
-        g.push(leaf_motif(&seed.index(k as u64), &sepal, &ls, acc));
+        g.push(leaf_motif_with_detail(
+            &seed.index(k as u64),
+            &sepal,
+            &ls,
+            acc,
+            detail,
+        ));
     }
     g
 }

@@ -19,6 +19,62 @@ use crate::geom::validate::{degenerate_segments, path_is_finite, sanitize};
 use crate::geom::{Curve, CurveExt, EPS, Surface};
 use kurbo::{Affine, BezPath, Point, Vec2};
 
+/// Level of detail of engraved ornament: how many canvas pixels one local unit of a motif
+/// covers once it is placed.
+///
+/// Motifs drawn in their own coordinates and scaled onto the canvas measure their features
+/// with [`Detail::canvas_size`] and leave out engraving too small to see there (hatching
+/// first, then secondary and lateral veins), keeping fills, outlines and main veins.
+/// [`Detail::FULL`], the default, draws everything at any size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Detail {
+    scale: f64,
+}
+
+impl Default for Detail {
+    fn default() -> Self {
+        Detail::FULL
+    }
+}
+
+impl Detail {
+    /// Everything is drawn, whatever its size.
+    pub const FULL: Detail = Detail {
+        scale: f64::INFINITY,
+    };
+
+    /// Detail for a motif whose local unit is `scale` canvas pixels. A non-finite or
+    /// non-positive scale gives [`Detail::FULL`].
+    pub fn at_scale(scale: f64) -> Detail {
+        if scale.is_finite() && scale > 0.0 {
+            Detail { scale }
+        } else {
+            Detail::FULL
+        }
+    }
+
+    /// Detail for a part drawn inside this motif under a further scale `s` (a flower placed
+    /// on a plant with `scale(s)`).
+    pub fn scaled(self, s: f64) -> Detail {
+        if s.is_finite() && s > 0.0 {
+            Detail {
+                scale: self.scale * s,
+            }
+        } else {
+            self
+        }
+    }
+
+    /// Canvas size in pixels of a local length (infinite for [`Detail::FULL`]).
+    pub fn canvas_size(self, local: f64) -> f64 {
+        if self.scale.is_infinite() {
+            f64::INFINITY
+        } else {
+            local * self.scale
+        }
+    }
+}
+
 /// Number of `u` samples used to scan a surface's half-width profile.
 const PROFILE_SAMPLES: usize = 128;
 
@@ -255,6 +311,18 @@ mod tests {
         assert!((r[1].0 - 0.9).abs() < 1e-5 && r[1].1 == 1.0);
         assert!(runs(|_| false, 8).is_empty());
         assert_eq!(runs(|_| true, 8), vec![(0.0, 1.0)]);
+    }
+
+    #[test]
+    fn detail_measures_canvas_size() {
+        assert_eq!(Detail::default(), Detail::FULL);
+        assert!(Detail::FULL.canvas_size(0.1).is_infinite());
+        assert_eq!(Detail::at_scale(0.5).canvas_size(10.0), 5.0);
+        assert_eq!(Detail::at_scale(0.5).scaled(4.0).canvas_size(10.0), 20.0);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(Detail::at_scale(bad), Detail::FULL);
+            assert_eq!(Detail::at_scale(2.0).scaled(bad), Detail::at_scale(2.0));
+        }
     }
 
     #[test]

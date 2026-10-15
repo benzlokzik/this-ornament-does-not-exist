@@ -338,13 +338,19 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
         .par_iter()
         .map(|(k, params, base, up, warm, target)| {
             let style = plant_style(palette, *warm);
-            let node = plant::plant(k, params, *base, *up, &style, acc);
-            // Normalise the drawn size (fern clumps grow far beyond their stem height).
-            let s = node.bounding_box().map_or(1.0, |bb| {
+            let grown = plant::grow(k, params, *base, *up, &style, acc);
+            // Normalise the drawn size (fern clumps grow far beyond their stem height),
+            // measured on a draft without engraving.
+            let silhouette = crate::ornament::Detail::at_scale(1e-9);
+            let draft = plant::plant_node_with_detail(&grown, &style, acc, silhouette);
+            let s = draft.bounding_box().map_or(1.0, |bb| {
                 (1.15 * target / bb.height().max(1e-6))
                     .min(0.8 * target / bb.width().max(1e-6))
                     .min(1.0)
             });
+            // Draw at the accuracy and level of detail of the plant's size on the canvas.
+            let detail = crate::ornament::Detail::at_scale(s);
+            let node = plant::plant_node_with_detail(&grown, &style, acc / s, detail);
             let b = base.to_vec2();
             Node::group(vec![node])
                 .with_transform(Affine::translate(b) * Affine::scale(s) * Affine::translate(-b))

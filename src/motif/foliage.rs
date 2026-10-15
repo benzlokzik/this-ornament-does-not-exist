@@ -25,7 +25,7 @@ use crate::geom::fit::{fit_curve, fit_points};
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::validate::sanitize;
 use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp};
-use crate::ornament::{HatchOptions, Shade, hatch};
+use crate::ornament::{Detail, HatchOptions, Shade, hatch};
 use crate::palette::Palette;
 use crate::rng::{Draw, SeedTree};
 use crate::scene::{Color, LineCap, Node, Style};
@@ -39,6 +39,12 @@ const VEINLET_MIN_LENGTH: f64 = 60.0;
 /// Fitting tolerance of detail lines (veins, hatching, tonal bands) as a fraction of the
 /// leaf length: far below their stroke widths, so the fit is invisible.
 const DETAIL_TOLERANCE: f64 = 0.002;
+/// Level of detail by the leaf length on the canvas (pixels): shorter leaves have no
+/// hatching, then no veinlets, then neither lateral veins nor tonal bands (fill, lit half,
+/// outline and midrib stay).
+const LOD_HATCH: f64 = 40.0;
+const LOD_VEINLETS: f64 = 28.0;
+const LOD_LATERALS: f64 = 16.0;
 /// Fraction of the box left free on each side by [`fit_to_box`] in [`variants`].
 const MARGIN: f64 = 0.08;
 
@@ -116,6 +122,18 @@ pub(crate) struct Vein {
     pub(crate) width: f64,
     /// Exponent of the taper `width · (1 − 0.9 t)^taper`.
     pub(crate) taper: f64,
+    /// Place in the vein hierarchy, which decides when the vein is left out of a small leaf.
+    pub(crate) rank: VeinRank,
+}
+
+/// Place of a vein in the hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum VeinRank {
+    Midrib,
+    /// Primary veins from the midrib (one per lobe, pinna or tooth).
+    Lateral,
+    /// Secondary veins from a lateral.
+    Veinlet,
 }
 
 /// An engraved leaf: two-tone fill, hatching on the shaded half, veins following the blade,
@@ -127,6 +145,18 @@ pub fn leaf_motif<C: Curve>(
     style: &LeafStyle,
     accuracy: f64,
 ) -> Node {
+    leaf_motif_with_detail(seed, leaf, style, accuracy, Detail::FULL)
+}
+
+/// [`leaf_motif`] at a level of detail: a leaf that is short on the canvas leaves out its
+/// hatching, then its veinlets, then its lateral veins and tonal bands.
+pub fn leaf_motif_with_detail<C: Curve>(
+    seed: &SeedTree,
+    leaf: &Leaf<C>,
+    style: &LeafStyle,
+    accuracy: f64,
+    detail: Detail,
+) -> Node {
     let acc = sane_accuracy(accuracy);
     let len = leaf.length();
     if !(len.is_finite() && len > 1e-6) {
@@ -137,6 +167,7 @@ pub fn leaf_motif<C: Curve>(
         return Node::empty();
     }
     let tol = acc.max(DETAIL_TOLERANCE * len);
+    let px = detail.canvas_size(len);
     let w = style.widths;
     // A frond's outline runs round many small pinnae; a full-weight line would clog them.
     let outline_width = w.outline
@@ -159,7 +190,12 @@ pub fn leaf_motif<C: Curve>(
     // A soft tonal band along the shaded edge, darkening towards the margin, under the
     // hatching: the blade turns away from the light there.
     let shade = style.fill.mix(style.ink, 0.45);
-    for (v0, opacity) in [(0.5, 0.3), (0.75, 0.35)] {
+    let bands: &[(f64, f64)] = if px < LOD_LATERALS {
+        &[]
+    } else {
+        &[(0.5, 0.3), (0.75, 0.35)]
+    };
+    for &(v0, opacity) in bands {
         let band = blade_band(leaf, dark_side * v0, dark_side, tol);
         if !band.elements().is_empty() {
             detail.push(Node::path(band, Style::fill(shade).with_opacity(opacity)));
@@ -178,7 +214,11 @@ pub fn leaf_motif<C: Curve>(
             width: 0.6,
         },
     };
-    let lines = hatch(leaf, &opts, &seed.child("leaf-hatch"), tol);
+    let lines = if px < LOD_HATCH {
+        Vec::new()
+    } else {
+        hatch(leaf, &opts, &seed.child("leaf-hatch"), tol)
+    };
     let merged = merge(&lines);
     if !merged.elements().is_empty() {
         let s = Style::stroke(style.ink.mix(style.fill, 0.25), w.hatch * len)
@@ -190,7 +230,17 @@ pub fn leaf_motif<C: Curve>(
     // Veins as filled tapering lines: dark on the lit half, light (an engraved highlight)
     // on the shaded half, where a dark line would vanish into the hatching.
     let (mut dark, mut light) = (Vec::new(), Vec::new());
+    let max_rank = if px < LOD_LATERALS {
+        VeinRank::Midrib
+    } else if px < LOD_VEINLETS {
+        VeinRank::Lateral
+    } else {
+        VeinRank::Veinlet
+    };
     for v in leaf_veins(seed, leaf, &w) {
+        if v.rank > max_rank {
+            continue;
+        }
         let p = vein_path(leaf, &v, tol);
         if p.elements().is_empty() {
             continue;
@@ -253,6 +303,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
         ),
         width: midrib,
         taper: 0.8,
+        rank: VeinRank::Midrib,
     }];
 
     match p.shape {
@@ -271,6 +322,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                         uv: q,
                         width: lateral,
                         taper: 1.0,
+                        rank: VeinRank::Lateral,
                     });
                     for (k, &su) in lobe.subs.iter().enumerate() {
                         let t0 = if k == 0 { 0.3 } else { 0.45 };
@@ -281,6 +333,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                             uv: QuadBez::new(a, c, e),
                             width: veinlet,
                             taper: 1.0,
+                            rank: VeinRank::Veinlet,
                         });
                     }
                 }
@@ -302,6 +355,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                         uv: q,
                         width: veinlet.max(0.6 * lateral),
                         taper: 1.0,
+                        rank: VeinRank::Lateral,
                     });
                 }
             }
@@ -330,6 +384,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                         uv: q,
                         width: lateral,
                         taper: 1.0,
+                        rank: VeinRank::Lateral,
                     });
                 }
             }
@@ -366,6 +421,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                         uv: q,
                         width: lateral,
                         taper: 1.0,
+                        rank: VeinRank::Lateral,
                     });
                     if big {
                         // Veinlets from the basal flank of the lateral towards the margin,
@@ -382,6 +438,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                                 uv: QuadBez::new(a, c, e),
                                 width: veinlet,
                                 taper: 1.0,
+                                rank: VeinRank::Veinlet,
                             });
                         }
                     }
@@ -396,6 +453,7 @@ pub(crate) fn leaf_veins<C: Curve>(seed: &SeedTree, leaf: &Leaf<C>, w: &VeinWidt
                             uv: q,
                             width: 0.85 * lateral,
                             taper: 1.0,
+                            rank: VeinRank::Lateral,
                         });
                     }
                 }
@@ -992,6 +1050,35 @@ mod tests {
             v.push(q);
         });
         v
+    }
+
+    #[test]
+    fn small_leaves_drop_fine_engraving_first() {
+        let leaf = Leaf::from_base(
+            Point::ZERO,
+            Vec2::new(1.0, 0.2),
+            200.0,
+            90.0,
+            LeafParams::new(LeafShape::Ovate),
+        );
+        let style = LeafStyle::from_palette(&pal(), true, 0.4);
+        let seed = SeedTree::new(7);
+        let draw = |d: Detail| leaf_motif_with_detail(&seed, &leaf, &style, 0.05, d);
+        let full = leaf_motif(&seed, &leaf, &style, 0.05);
+        assert_eq!(draw(Detail::FULL), full);
+        assert_eq!(draw(Detail::at_scale(1.0)), full);
+        // 200 units at these scales: 36 px (no hatching), 20 px (no veinlets), 10 px.
+        let counts: Vec<usize> = [0.18, 0.1, 0.05]
+            .into_iter()
+            .map(|s| draw(Detail::at_scale(s)).path_count())
+            .collect();
+        assert!(full.path_count() > counts[0], "{counts:?}");
+        assert!(
+            counts[0] >= counts[1] && counts[1] > counts[2],
+            "{counts:?}"
+        );
+        // The smallest keeps fill, lit half, midrib (one merged vein path) and outline.
+        assert_eq!(counts[2], 4, "{counts:?}");
     }
 
     #[test]

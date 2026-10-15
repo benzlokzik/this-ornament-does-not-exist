@@ -21,6 +21,7 @@
 use crate::geom::fit::fit_points;
 use crate::geom::validate::sanitize;
 use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp, smoothstep, unlerp};
+use crate::ornament::Detail;
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
 use crate::scene::{Color, Node, Style};
@@ -32,6 +33,14 @@ const MIN_SEG: f64 = 1e-7;
 /// Fitting tolerance of detail lines (veins, hatching, base shading) as a fraction of the
 /// petal size: far below their stroke widths, so the fit is invisible.
 const DETAIL_TOLERANCE: f64 = 0.002;
+/// Level of detail by the petal size on the canvas (pixels, see [`Petal::size`]): smaller
+/// petals have no hatching, then no vein forks, then neither lateral veins nor base
+/// shading (fill, outline and midrib stay).
+const LOD_HATCH: f64 = 24.0;
+const LOD_FORKS: f64 = 16.0;
+const LOD_VEINS: f64 = 10.0;
+/// Discs smaller than this on the canvas (radius, pixels) are drawn without florets.
+const LOD_FLORETS: f64 = 6.0;
 /// Exponent of the curl profile `θ(s) = curl · (s/L)^BEND_EXP`: > 1 keeps the base straight
 /// and concentrates the bend towards the tip, like a real petal.
 const BEND_EXP: f64 = 1.6;
@@ -796,18 +805,28 @@ fn vein_plan(profile: PetalProfile) -> VeinPlan {
 }
 
 /// All detail geometry of a petal in petal-local coordinates (unclipped).
-fn petal_detail(seed: &SeedTree, petal: &Petal, accuracy: f64) -> Vec<(BezPath, Ink)> {
+///
+/// At a reduced `detail` the lines too fine for the petal's canvas size are left out; the
+/// random draws stay the same, so the lines that remain do not move.
+fn petal_detail(
+    seed: &SeedTree,
+    petal: &Petal,
+    accuracy: f64,
+    detail: Detail,
+) -> Vec<(BezPath, Ink)> {
     let mut rng = seed.child("veins").rng();
     let p = petal.params();
     let size = petal.size();
     let acc = sane_accuracy(accuracy).max(DETAIL_TOLERANCE * size);
+    let px = detail.canvas_size(size);
+    let (hatches, forks, veins) = (px >= LOD_HATCH, px >= LOD_FORKS, px >= LOD_VEINS);
     let aspect = p.width / p.length;
     let (w_mid, w_lat, w_fork, w_hatch) = (0.02 * size, 0.011 * size, 0.007 * size, 0.006 * size);
     let mut out = Vec::new();
     let plan = vein_plan(p.profile);
 
     // Base shading: stacked translucent arches emulate a gradient towards the base.
-    if plan != VeinPlan::Parallel {
+    if plan != VeinPlan::Parallel && veins {
         for ut in [0.14, 0.24, 0.36] {
             out.push((petal.base_region(ut, acc), Ink::Shade));
         }
@@ -823,6 +842,9 @@ fn petal_detail(seed: &SeedTree, petal: &Petal, accuracy: f64) -> Vec<(BezPath, 
         }
         let reach = if plan == VeinPlan::Parallel { 0.6 } else { 1.0 };
         let ue = reach * lerp(0.32, 0.12, v.abs()) * rng.uniform(0.85, 1.15);
+        if !hatches {
+            continue;
+        }
         let q = QuadBez::new(uv(0.0, v), uv(0.5 * ue, v), uv(ue, v));
         let path = tapered(&uv_curve(petal, q), |t| w_hatch * (1.0 - t), acc);
         out.push((path, Ink::Hatch));
@@ -857,13 +879,17 @@ fn petal_detail(seed: &SeedTree, petal: &Petal, accuracy: f64) -> Vec<(BezPath, 
                     // and then runs parallel to the edge.
                     let cu = lerp(su, eu, 0.4 + rng.jitter(0.0, 0.05));
                     let q = QuadBez::new(uv(su, sv), uv(cu, 0.85 * ev), uv(eu, ev));
-                    out.push((vein(q, w_lat), Ink::Vein));
+                    if veins {
+                        out.push((vein(q, w_lat), Ink::Vein));
+                    }
                     if j >= 2 && rng.chance(0.7) {
                         // A fork between this vein and the previous one, bending to the tip.
                         let s = q.eval(rng.uniform(0.45, 0.6));
                         let e = uv((s.x + 0.25).min(0.95), ev * rng.uniform(0.55, 0.72));
                         let c = uv(lerp(s.x, e.x, 0.5), lerp(s.y, e.y, 0.25));
-                        out.push((vein(QuadBez::new(s, c, e), w_fork), Ink::Vein));
+                        if forks {
+                            out.push((vein(QuadBez::new(s, c, e), w_fork), Ink::Vein));
+                        }
                     }
                 }
             }
@@ -879,19 +905,25 @@ fn petal_detail(seed: &SeedTree, petal: &Petal, accuracy: f64) -> Vec<(BezPath, 
                     let s = uv(0.03, side * 0.04 * f);
                     let e = uv(lerp(0.95, 0.8, f) + rng.jitter(0.0, 0.02), 0.3 * peak);
                     let c = uv(lerp(s.x, e.x, 0.42), (1.6 * peak).clamp(-1.1, 1.1));
-                    out.push((vein(QuadBez::new(s, c, e), w_lat), Ink::Vein));
+                    if veins {
+                        out.push((vein(QuadBez::new(s, c, e), w_lat), Ink::Vein));
+                    }
                 }
                 // A faint groove alongside the midrib.
                 let v = side * 0.12;
                 let q = QuadBez::new(uv(0.04, v), uv(0.35, v * 1.3), uv(0.7, v));
-                out.push((vein(q, w_fork), Ink::Vein));
+                if forks {
+                    out.push((vein(q, w_fork), Ink::Vein));
+                }
             }
         }
         VeinPlan::Parallel => {
             for side in [-1.0, 1.0] {
                 let v = side * rng.uniform(0.42, 0.55);
                 let q = QuadBez::new(uv(0.05, 0.5 * v), uv(0.4, v), uv(0.82, 0.8 * v));
-                out.push((vein(q, w_fork), Ink::Vein));
+                if forks {
+                    out.push((vein(q, w_fork), Ink::Vein));
+                }
             }
         }
     }
@@ -910,13 +942,25 @@ pub fn petal(
     style: &FlowerStyle,
     accuracy: f64,
 ) -> (BezPath, Node) {
+    petal_with_detail(seed, petal, fill, style, accuracy, Detail::FULL)
+}
+
+/// [`petal`] at a level of detail (see [`petal_detail`]).
+fn petal_with_detail(
+    seed: &SeedTree,
+    petal: &Petal,
+    fill: Color,
+    style: &FlowerStyle,
+    accuracy: f64,
+    detail: Detail,
+) -> (BezPath, Node) {
     let acc = sane_accuracy(accuracy);
     let outline = petal.outline(acc);
     let size = petal.size();
     let shade = fill.mix(style.ink, 0.25);
     let vein = fill.mix(style.vein, 0.75);
     let hatch = fill.mix(style.ink, 0.5);
-    let detail: Vec<Node> = petal_detail(seed, petal, acc)
+    let detail: Vec<Node> = petal_detail(seed, petal, acc, detail)
         .into_iter()
         .map(|(path, ink)| {
             let s = match ink {
@@ -1089,6 +1133,19 @@ impl FlowerParams {
 /// Within a layer petal `i` is drawn over petal `i - 1`, and the first petal is redrawn
 /// clipped to its overlap with the last one so the ring closes consistently.
 pub fn flower(seed: &SeedTree, params: &FlowerParams, style: &FlowerStyle, accuracy: f64) -> Node {
+    flower_with_detail(seed, params, style, accuracy, Detail::FULL)
+}
+
+/// [`flower`] at a level of detail: petals that are small on the canvas leave out their
+/// hatching, then their vein forks, then their lateral veins and base shading, and a small
+/// disc its florets.
+pub fn flower_with_detail(
+    seed: &SeedTree,
+    params: &FlowerParams,
+    style: &FlowerStyle,
+    accuracy: f64,
+    detail: Detail,
+) -> Node {
     let seed = seed.child("flower");
     let acc = sane_accuracy(accuracy);
     let jitter = finite_or(params.jitter, 0.0).clamp(0.0, 1.0);
@@ -1120,13 +1177,14 @@ pub fn flower(seed: &SeedTree, params: &FlowerParams, style: &FlowerStyle, accur
         };
         let base = style.petal.mix(style.petal_light, 0.1 + 0.55 * depth);
         let lseed = seed.child("layer").index(li as u64);
-        root.push(layer_node(&lseed, layer, jitter, base, style, acc));
+        root.push(layer_node(&lseed, layer, jitter, base, style, acc, detail));
     }
     root.push(center_node(
         &seed.child("center"),
         &params.center,
         style,
         acc,
+        detail,
     ));
     root
 }
@@ -1147,6 +1205,7 @@ fn layer_node(
     base: Color,
     style: &FlowerStyle,
     acc: f64,
+    detail: Detail,
 ) -> Node {
     let count = layer.count.min(4096);
     let mut group = Node::empty();
@@ -1173,7 +1232,7 @@ fn layer_node(
         let fill = base
             .mix(style.petal_light, rng.uniform(0.0, 0.15) * jitter)
             .lighten(rng.jitter(0.0, 0.03 * jitter));
-        let (outline, node) = petal(&pseed, &shape, fill, style, acc);
+        let (outline, node) = petal_with_detail(&pseed, &shape, fill, style, acc, detail);
         // Local +y (the petal axis) must point along the radial direction (cos a, sin a).
         let t = Affine::translate(Vec2::new(angle.cos(), angle.sin()) * radius)
             * Affine::rotate(angle - FRAC_PI_2);
@@ -1223,7 +1282,14 @@ const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 /// A disc with florets on a Vogel spiral: floret `k` at radius `R·sqrt((k+½)/n)` and angle
 /// `k·golden_angle`, which packs them evenly. Florets grow slightly towards the rim and get
 /// lighter towards the middle to suggest a dome.
-fn disc_nodes(radius: f64, seeds: usize, rot: f64, style: &FlowerStyle, acc: f64) -> Vec<Node> {
+fn disc_nodes(
+    radius: f64,
+    seeds: usize,
+    rot: f64,
+    style: &FlowerStyle,
+    acc: f64,
+    detail: Detail,
+) -> Vec<Node> {
     let mut out = Vec::new();
     let Some(disc) = circle(Point::ORIGIN, radius, acc) else {
         return out;
@@ -1232,7 +1298,11 @@ fn disc_nodes(radius: f64, seeds: usize, rot: f64, style: &FlowerStyle, acc: f64
         disc,
         Style::fill_stroke(style.center, style.ink, 0.04 * radius),
     ));
-    let n = seeds.min(5000);
+    let n = if detail.canvas_size(radius) < LOD_FLORETS {
+        0
+    } else {
+        seeds.min(5000)
+    };
     let r_in = 0.9 * radius;
     for k in 0..n {
         let f = (k as f64 + 0.5) / n as f64;
@@ -1251,14 +1321,20 @@ fn disc_nodes(radius: f64, seeds: usize, rot: f64, style: &FlowerStyle, acc: f64
     out
 }
 
-fn center_node(seed: &SeedTree, center: &CenterStyle, style: &FlowerStyle, acc: f64) -> Node {
+fn center_node(
+    seed: &SeedTree,
+    center: &CenterStyle,
+    style: &FlowerStyle,
+    acc: f64,
+    detail: Detail,
+) -> Node {
     let mut rng = seed.rng();
     let mut nodes = Vec::new();
     match *center {
         CenterStyle::None => {}
         CenterStyle::Disc { radius, seeds } => {
             let radius = finite_or(radius, 0.0).max(0.0);
-            nodes = disc_nodes(radius, seeds, rng.uniform(0.0, TAU), style, acc);
+            nodes = disc_nodes(radius, seeds, rng.uniform(0.0, TAU), style, acc, detail);
         }
         CenterStyle::Stamens {
             count,
@@ -1299,7 +1375,14 @@ fn center_node(seed: &SeedTree, center: &CenterStyle, style: &FlowerStyle, acc: 
             }
             nodes.extend(heads);
             let seeds = ((radius * radius) / (0.04 * length * length).max(1e-9)).clamp(5.0, 60.0);
-            nodes.extend(disc_nodes(radius, seeds as usize, PI * 0.1, style, acc));
+            nodes.extend(disc_nodes(
+                radius,
+                seeds as usize,
+                PI * 0.1,
+                style,
+                acc,
+                detail,
+            ));
         }
     }
     Node::group(nodes)
@@ -1647,6 +1730,27 @@ mod tests {
         ok
     }
 
+    #[test]
+    fn small_flowers_drop_fine_engraving_first() {
+        let (_, params) = variants(&SeedTree::new(2))
+            .into_iter()
+            .find(|(n, _)| n == "rose")
+            .unwrap();
+        let s = style();
+        let seed = SeedTree::new(4);
+        let draw = |d: Detail| flower_with_detail(&seed, &params, &s, 0.05, d);
+        let full = flower(&seed, &params, &s, 0.05);
+        assert_eq!(draw(Detail::FULL), full);
+        // Outer radius on the canvas: 200, 60, 20 and 5 px.
+        let counts: Vec<usize> = [200.0, 60.0, 20.0, 5.0]
+            .into_iter()
+            .map(|r| draw(Detail::at_scale(r / params.outer_radius())).path_count())
+            .collect();
+        assert_eq!(counts[0], full.path_count(), "{counts:?}");
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "{counts:?}");
+        assert!(counts[3] < full.path_count() / 2, "{counts:?}");
+    }
+
     fn style() -> FlowerStyle {
         FlowerStyle::from_palette(&crate::palette::all()[0], true, 0.4)
     }
@@ -1728,7 +1832,7 @@ mod tests {
         for profile in PetalProfile::ALL {
             let petal = Petal::new(&params(profile));
             let outline = petal.outline(0.05);
-            let detail = petal_detail(&SeedTree::new(3), &petal, 0.05);
+            let detail = petal_detail(&SeedTree::new(3), &petal, 0.05, Detail::FULL);
             assert!(detail.iter().filter(|(_, k)| *k == Ink::Vein).count() >= 3);
             let (mut inside, mut total) = (0usize, 0usize);
             for (path, ink) in &detail {
@@ -2009,7 +2113,7 @@ mod tests {
     #[test]
     fn disc_florets_follow_the_golden_angle() {
         let s = style();
-        let nodes = disc_nodes(20.0, 50, 0.0, &s, 0.1);
+        let nodes = disc_nodes(20.0, 50, 0.0, &s, 0.1, Detail::FULL);
         assert_eq!(nodes.len(), 51);
         // Every floret stays inside the disc.
         for n in &nodes[1..] {
