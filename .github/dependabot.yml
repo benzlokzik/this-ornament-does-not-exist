@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # Rust / Cargo
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      cargo-patch:
+        update-types: ["patch"]
+      cargo-minor:
+        update-types: ["minor"]
+      cargo-major:
+        update-types: ["major"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      github-actions-patch:
+        update-types: ["patch"]
+      github-actions-minor:
+        update-types: ["minor"]
+      github-actions-major:
+        update-types: ["major"]
+    commit-message:
+      prefix: "chore(ci)"
