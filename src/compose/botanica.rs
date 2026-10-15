@@ -19,17 +19,19 @@
 //!    flowers, placed where the focal density mask is high and shrinking with distance from
 //!    the nearest focus.
 //! 6. **Focal flowers** on collars of crisp leaves, with compound scrolls behind them.
-//! 7. **Background foliage** fills the space left by everything else: leaves along the
-//!    field direction, dim and low-contrast, placed where the keep-out mask of all placed
-//!    elements is high.
+//! 7. **Background foliage** flows in sprigs along short streamlines of the field, seeded
+//!    near the divider and the foci and fading out in the open areas (which stay quiet),
+//!    plus small leaf clusters by the focal flowers; dim, low-contrast and kept clear of
+//!    everything already placed.
 
 use super::field::{
-    Band, Combine, Constant, Field, FnMask, FocalPoint, Mask, along_curve, focal_mask, place_points,
+    Band, Combine, Constant, Field, FnMask, FocalPoint, Mask, along_curve, focal_mask,
+    place_points, trace,
 };
 use super::landscape::{Opening, WindowShape, opening_node};
 use super::layout::{
     Canvas, Layer, Layers, Occupancy, flower_style, leaf_style, muted_leaf, plant_style,
-    ribbon_style, unit_or,
+    ribbon_style,
 };
 use super::preset::{
     Focus, background, budget, compound_scroll, divider_band, fit_tail, flow_field, flower_at,
@@ -537,59 +539,183 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
         );
     }
 
-    // 7. Background foliage where nothing else sits: sprays of leaves fanning from a common
-    // point along the field, then single leaves in the gaps that remain.
-    let up = Vec2::new(0.0, -1.0);
-    let area = Rect::new(-0.03 * w, -0.03 * h, 1.03 * w, 1.03 * h);
-    // (base, direction, length, warm, shape seed)
-    let mut specs: Vec<(Point, Vec2, f64, bool, SeedTree)> = Vec::new();
-    let mut gaps = occ.clone();
-    let centers = place_points(
-        seed.child("sprays"),
-        area,
-        &occ.free_mask(0.05 * u),
-        &|_| 0.16 * u,
-        (36.0 * fill) as usize,
+    // 7. Background foliage flowing along the ornament.
+    background_foliage(
+        &seed,
+        &canvas,
+        palette,
+        &field,
+        &foci,
+        &occ,
+        fill,
+        acc,
+        &mut layers,
     );
-    for (j, p) in centers.into_iter().enumerate() {
-        let k = seed.child("spray").index(j as u64);
-        let mut srng = k.rng();
-        let flow = unit_or(field.at(p), up);
-        let n = 3 + (srng.uniform(0.0, 3.0) as usize).min(2);
-        let spread = srng.uniform(0.45, 0.75);
-        let len0 = u * srng.uniform(0.09, 0.14);
-        let base = p - flow * (0.4 * len0);
-        for i in 0..n {
-            let f = if n > 1 {
-                2.0 * i as f64 / (n - 1) as f64 - 1.0
-            } else {
-                0.0
-            };
-            let d = rotate(flow, f * spread + srng.jitter(0.0, 0.1));
-            let len = len0 * (1.0 - 0.3 * f.abs()) * srng.uniform(0.9, 1.1);
-            specs.push((base, d, len, canvas.is_warm(p), k));
-        }
-        gaps.add_circle(p, 0.75 * len0);
-    }
-    let singles = place_points(
-        seed.child("back-singles"),
+    (canvas, layers)
+}
+
+/// Background foliage (rule 7): dim sprigs flowing along the field, gathered near the
+/// divider band and the foci, with quiet zones in the open areas between them.
+///
+/// Sprig bases are seeded by a density mask that is high along the divider and around
+/// each focus and falls to almost nothing in the open, times the keep-out mask of
+/// everything already placed. Each sprig is a short streamline of the flow field with a
+/// thin stem and 3–7 leaves alternating along it, tangent to it and shrinking towards its
+/// end; sprigs keep clear of each other. A few small clusters of 2–4 overlapping leaves
+/// fan out next to each focal flower. Leaves are muted and drawn at reduced opacity.
+#[allow(clippy::too_many_arguments)]
+fn background_foliage(
+    seed: &SeedTree,
+    canvas: &Canvas,
+    palette: &Palette,
+    field: &dyn Field,
+    foci: &[Focus],
+    occ: &Occupancy,
+    fill: f64,
+    acc: f64,
+    layers: &mut Layers,
+) {
+    let (w, h, u) = (canvas.width, canvas.height, canvas.unit());
+    let area = Rect::new(-0.03 * w, -0.03 * h, 1.03 * w, 1.03 * h);
+    let bounds = Rect::new(-0.02 * w, -0.02 * h, 1.02 * w, 1.02 * h);
+    let near: Vec<FocalPoint> = foci
+        .iter()
+        .map(|f| FocalPoint {
+            center: f.center,
+            radius: 2.6 * f.radius + 0.14 * u,
+            weight: 1.0,
+        })
+        .collect();
+    let density = Combine::Multiply(
+        Box::new(Combine::Max(
+            Box::new(Combine::Max(
+                Box::new(Band::along(&canvas.divider, 0.4 * u, 0.85)),
+                Box::new(focal_mask(&near)),
+            )),
+            Box::new(Constant(0.03)),
+        )),
+        Box::new(occ.free_mask(0.04 * u)),
+    );
+    // (base, direction, length, warm, shape seed): leaves of one sprig share a shape.
+    let mut specs: Vec<(Point, Vec2, f64, bool, SeedTree)> = Vec::new();
+    let mut stems = Node::empty();
+    let mut used = Occupancy::new();
+    let bases = place_points(
+        seed.child("back-sprigs"),
         area,
-        &gaps.free_mask(0.03 * u),
-        &|_| 0.06 * u,
+        &density,
+        &|_| 0.13 * u,
         (30.0 * fill) as usize,
     );
-    for (j, p) in singles.into_iter().enumerate() {
-        let k = seed.child("back-single").index(j as u64);
-        let mut lrng = k.rng();
-        let d = rotate(unit_or(field.at(p), up), lrng.jitter(0.0, 0.5));
-        let len = u * lrng.uniform(0.05, 0.08);
-        specs.push((p - d * (0.45 * len), d, len, canvas.is_warm(p), k));
+    for (j, p) in bases.into_iter().enumerate() {
+        let k = seed.child("back-sprig").index(j as u64);
+        let mut srng = k.rng();
+        if used.contains(p) {
+            continue;
+        }
+        let length = u * srng.uniform(0.22, 0.34);
+        let Some(stream) = trace(field, p, 0.008 * u, length, bounds, true) else {
+            continue;
+        };
+        let total = stream.length();
+        if !(total.is_finite() && total > 0.1 * u) {
+            continue;
+        }
+        let warm = canvas.is_warm(p);
+        let count = ((total / (0.05 * u)) as usize).clamp(3, 7);
+        let len0 = u * srng.uniform(0.085, 0.115);
+        let first = srng.chance(0.5);
+        let spacing = total / count as f64;
+        // Leaves along the longest stretch of the streamline that is free.
+        let at = along_curve(&stream, spacing, 0.25, k.child("at"));
+        let free: Vec<bool> = at
+            .iter()
+            .map(|(_, q, _)| !occ.contains(*q) && !used.contains(*q))
+            .collect();
+        let (mut i0, mut best, mut run) = (0, 0, 0);
+        for (i, &ok) in free.iter().enumerate() {
+            run = if ok { run + 1 } else { 0 };
+            if run > best {
+                (best, i0) = (run, i + 1 - run);
+            }
+        }
+        if best < 2 {
+            continue;
+        }
+        let run = &at[i0..i0 + best];
+        for (i, (_, q, tg)) in run.iter().enumerate() {
+            let f = i as f64 / (count - 1).max(1) as f64;
+            let side = if (i % 2 == 0) == first { 1.0 } else { -1.0 };
+            let d = rotate(*tg, side * srng.uniform(0.45, 0.75));
+            let len = len0 * lerp(1.0, 0.5, f) * srng.uniform(0.9, 1.1);
+            specs.push((*q, d, len, warm, k));
+        }
+        let placed = best;
+        // The stem runs from just before the first leaf to just past the last, traced
+        // along the field from whichever end the field flows away from.
+        let (s, e) = (run[0], run[best - 1]);
+        let stem_len = (best as f64 + 0.2) * spacing;
+        let forward = field.at(s.1).dot(s.2) >= 0.0;
+        let from = if forward {
+            s.1 - s.2 * (0.4 * spacing)
+        } else {
+            e.1 + e.2 * (0.4 * spacing)
+        };
+        let stream = trace(field, from, 0.008 * u, stem_len, bounds, false).unwrap_or(stream);
+        if placed >= 2 {
+            let warmth = mean_warmth(canvas, &stream);
+            let mut style = ribbon_style(palette, warmth, 0.1);
+            for c in [
+                &mut style.fill,
+                &mut style.highlight,
+                &mut style.shade,
+                &mut style.stripe,
+                &mut style.ink,
+            ] {
+                *c = c.saturate(0.7).mix(palette.background, 0.3);
+            }
+            stems.push(scroll_ribbon(
+                &k,
+                &stream,
+                0.0035 * u,
+                (0.05, 0.3),
+                0,
+                &style,
+                acc,
+            ));
+        }
+        used.add_curve(&stream, 0.07 * u);
+    }
+    // Small clusters by the focal flowers, just outside their collars.
+    for (i, f) in foci.iter().enumerate() {
+        let k = seed.child("back-cluster").index(i as u64);
+        let mut crng = k.rng();
+        let clusters = 1 + usize::from(crng.chance(0.5));
+        let a0 = crng.uniform(0.0, TAU);
+        for c in 0..clusters {
+            let a = a0 + c as f64 * TAU / clusters as f64 + crng.jitter(0.0, 0.5);
+            let out = Vec2::from_angle(a);
+            let base = f.center + out * (f.radius * crng.uniform(1.15, 1.35));
+            if !area.contains(base) || used.contains(base) {
+                continue;
+            }
+            let n = 2 + (crng.uniform(0.0, 3.0) as usize).min(2);
+            let len0 = u * crng.uniform(0.07, 0.095);
+            let spread = crng.uniform(0.35, 0.6);
+            let ck = k.index(c as u64);
+            for l in 0..n {
+                let t = l as f64 / (n - 1) as f64 * 2.0 - 1.0;
+                let d = rotate(out, t * spread + crng.jitter(0.0, 0.08));
+                let len = len0 * (1.0 - 0.25 * t.abs()) * crng.uniform(0.9, 1.1);
+                specs.push((base, d, len, canvas.is_warm(base), ck));
+            }
+            used.add_circle(base, 0.08 * u);
+        }
     }
     let leaves: Vec<Node> = specs
         .into_par_iter()
         .enumerate()
         .map(|(j, (base, d, len, warm, shape_seed))| {
-            // Leaves of one spray share their shape; colour and detail vary per leaf.
             let (shape, aspect) = leaf_shape(&mut shape_seed.rng(), warm);
             let k = seed.child("back-leaf").index(j as u64);
             let mut lrng = k.rng();
@@ -605,7 +731,12 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
         .collect();
     let mut back = Node::empty();
     let reserve = layers.budget.remaining();
-    let mut spent = 0;
+    let mut spent = stems.path_count();
+    if spent <= reserve {
+        back.push(stems);
+    } else {
+        spent = 0;
+    }
     for leaf in leaves {
         let n = leaf.path_count();
         if spent + n > reserve {
@@ -615,12 +746,43 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
         back.push(leaf);
     }
     layers.add(Layer::BackFoliage, back.with_opacity(0.72));
-    (canvas, layers)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Leaves of the background foliage layer (its first child holds the stems).
+    fn back_leaves(seed: u64) -> usize {
+        let config = Config {
+            seed,
+            ..Config::default()
+        };
+        let palette = Palette::by_name("botanica").unwrap();
+        let (_, layers) = compose(&config, &palette);
+        let Node::Group { children, .. } = layers.into_node() else {
+            panic!("artwork")
+        };
+        let layer = children
+            .iter()
+            .find(|n| matches!(n, Node::Group { id: Some(id), .. } if id == "back-foliage"))
+            .expect("back-foliage layer");
+        let Node::Group { children, .. } = layer else {
+            panic!("layer")
+        };
+        let Node::Group { children: back, .. } = &children[0] else {
+            panic!("back group")
+        };
+        back.len() - 1
+    }
+
+    #[test]
+    fn background_foliage_is_sparse_sprigs() {
+        for seed in [1, 2] {
+            let n = back_leaves(seed);
+            assert!((15..=110).contains(&n), "seed {seed}: {n} leaves");
+        }
+    }
 
     #[test]
     fn fit_handles_empty_ranges() {
