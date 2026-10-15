@@ -2,7 +2,9 @@
 
 mod style;
 
-pub use style::{Color, LineCap, LineJoin, Style};
+pub use style::{
+    Color, GradientUnits, LineCap, LineJoin, LinearGradient, Paint, RadialGradient, Style,
+};
 
 use kurbo::{Affine, BezPath, Rect, Shape};
 use serde::{Deserialize, Serialize};
@@ -154,7 +156,7 @@ impl Node {
         fn walk(n: &Node, ok: &mut bool) {
             match n {
                 Node::Path { path, style } => {
-                    *ok &= path_finite(path) && style.stroke_width.is_finite();
+                    *ok &= path_finite(path) && style.is_finite();
                 }
                 Node::Group {
                     transform,

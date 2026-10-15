@@ -9,12 +9,23 @@
 //! clipped to and stroked) is written once in `<defs>` as `<path id="p0">`, `p1`, … and
 //! referenced with `<use href>`, which renders identically.
 //!
+//! Gradient paints become `<linearGradient>`/`<radialGradient>` elements in the same
+//! `<defs>`, with ids `g0`, `g1`, … in document order of first use, referenced as
+//! `fill="url(#gN)"`. Equal gradients share one definition (keyed by their serialised
+//! element), so a motif repeated with the same shading costs one def. Bounding-box units
+//! are SVG's default and are not written; user-space gradients carry
+//! `gradientUnits="userSpaceOnUse"`.
+//!
 //! Non-finite geometry never reaches the output: a path with a NaN/∞ coordinate is skipped,
 //! a group with a non-finite transform is skipped with its subtree, and a non-finite clip is
-//! sanitised (its non-finite elements are dropped).
+//! sanitised (its non-finite elements are dropped). A gradient with non-finite geometry is
+//! drawn in its mean colour, and stops with non-finite offsets are dropped.
 
 use crate::geom::validate;
-use crate::scene::{Color, LineCap, LineJoin, Node, Scene, Style};
+use crate::scene::{
+    Color, GradientUnits, LineCap, LineJoin, LinearGradient, Node, Paint, RadialGradient, Scene,
+    Style,
+};
 use kurbo::{Affine, BezPath, PathEl, Point};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -53,19 +64,17 @@ pub(crate) fn build_document(scene: &Scene, with_background: bool) -> svg::Docum
 
     let mut counts = HashMap::new();
     count_path_data(&scene.root, &mut counts);
-    let mut em = Emitter {
-        clips: Vec::new(),
-        shared: Vec::new(),
-        ids: HashMap::new(),
-        counts,
-    };
+    let mut em = Emitter::new(counts);
     let mut body = Vec::new();
     emit_node(&scene.root, &mut em, &mut body);
 
-    if !em.clips.is_empty() || !em.shared.is_empty() {
+    if !em.clips.is_empty() || !em.shared.is_empty() || !em.gradients.is_empty() {
         let mut defs = Definitions::new();
         for p in em.shared {
             defs.append(p);
+        }
+        for g in em.gradients {
+            defs.append(g);
         }
         for c in em.clips {
             defs.append(c);
@@ -98,9 +107,37 @@ struct Emitter {
     ids: HashMap<String, usize>,
     /// How often each path data string occurs in the document.
     counts: HashMap<String, usize>,
+    /// Gradient definitions, `<linearGradient id="gN">` / `<radialGradient>` in id order.
+    gradients: Vec<Element>,
+    /// Id number of each gradient, keyed by its serialised element without the id (only
+    /// looked up, never iterated, so the output order stays deterministic).
+    gradient_ids: HashMap<String, usize>,
 }
 
 impl Emitter {
+    fn new(counts: HashMap<String, usize>) -> Emitter {
+        Emitter {
+            clips: Vec::new(),
+            shared: Vec::new(),
+            ids: HashMap::new(),
+            counts,
+            gradients: Vec::new(),
+            gradient_ids: HashMap::new(),
+        }
+    }
+
+    /// The id number of the definition of gradient `el` (an element without an id),
+    /// registering it on first use.
+    fn gradient(&mut self, el: Element) -> usize {
+        let next = self.gradient_ids.len();
+        *self.gradient_ids.entry(el.to_string()).or_insert_with(|| {
+            let mut el = el;
+            el.assign("id", format!("g{next}"));
+            self.gradients.push(el);
+            next
+        })
+    }
+
     /// A `<path>` with data `d`, or a `<use>` of the shared copy when `d` repeats.
     fn shape(&mut self, d: String) -> Element {
         if d.len() < MIN_SHARED || self.counts.get(&d).is_none_or(|&n| n < 2) {
@@ -176,7 +213,7 @@ fn emit_node(node: &Node, em: &mut Emitter, out: &mut Vec<Box<dyn svg::Node>>) {
                 && let Some(d) = path_data(path)
             {
                 let mut el = em.shape(d);
-                apply_style(&mut el, style);
+                apply_style(&mut el, style, path, em);
                 out.push(Box::new(el));
             }
         }
@@ -257,32 +294,90 @@ fn path_element(path: &BezPath, style: &Style) -> Option<SvgPath> {
         return None;
     }
     let mut el = SvgPath::new().set("d", path_data(path)?);
-    apply_style(&mut el, style);
+    apply_style(&mut el, style, path, &mut Emitter::new(HashMap::new()));
     Some(el)
 }
 
-/// The visible stroke colour of `style`: none when the width is zero or not finite.
-fn stroke_of(style: &Style) -> Option<Color> {
-    style
-        .stroke
-        .filter(|_| style.stroke_width.is_finite() && style.stroke_width > 0.0)
+/// A fill or stroke paint as it is written.
+#[derive(Clone, Copy)]
+enum Resolved<'a> {
+    Solid(Color),
+    Linear(&'a LinearGradient),
+    Radial(&'a RadialGradient),
+}
+
+/// The paint of `paint` (overriding `color`), or `None` if it paints nothing. A gradient
+/// without stops of finite offset paints nothing; one with a single such stop, a non-finite
+/// geometry or a non-positive radius is drawn in a plain colour.
+fn resolve(paint: Option<&Paint>, color: Option<Color>) -> Option<Resolved<'_>> {
+    let Some(p) = paint else {
+        return color.map(Resolved::Solid);
+    };
+    let mut finite = p.stops().iter().filter(|(o, _)| o.is_finite());
+    let (geometry_ok, resolved) = match p {
+        Paint::Solid(c) => return Some(Resolved::Solid(*c)),
+        Paint::Linear(g) => (
+            g.start.is_finite() && g.end.is_finite(),
+            Resolved::Linear(g),
+        ),
+        Paint::Radial(g) => (
+            g.center.is_finite()
+                && g.radius.is_finite()
+                && g.radius > 0.0
+                && g.focal.is_none_or(|f| f.is_finite()),
+            Resolved::Radial(g),
+        ),
+    };
+    let first = finite.next()?.1;
+    let Some(last) = finite.next_back() else {
+        return Some(Resolved::Solid(first));
+    };
+    if geometry_ok {
+        Some(resolved)
+    } else {
+        // SVG paints a zero radius in the last stop's colour; use it for any bad geometry.
+        Some(Resolved::Solid(last.1))
+    }
+}
+
+/// The visible fill of `style`.
+fn fill_of(style: &Style) -> Option<Resolved<'_>> {
+    resolve(style.fill_paint.as_ref(), style.fill)
+}
+
+/// The visible stroke of `style`: none when the width is zero or not finite.
+fn stroke_of(style: &Style) -> Option<Resolved<'_>> {
+    if !(style.stroke_width.is_finite() && style.stroke_width > 0.0) {
+        return None;
+    }
+    resolve(style.stroke_paint.as_ref(), style.stroke)
 }
 
 /// `false` if a path in `style` would paint nothing.
 fn visible(style: &Style) -> bool {
-    unit(style.opacity) > 0.0 && (style.fill.is_some() || stroke_of(style).is_some())
+    unit(style.opacity) > 0.0 && (fill_of(style).is_some() || stroke_of(style).is_some())
 }
 
-/// Set the fill, stroke and opacity attributes of `style` on `el`, omitting SVG defaults.
-fn apply_style(el: &mut impl svg::Node, style: &Style) {
+/// Set the fill, stroke and opacity attributes of `style` on `el`, omitting SVG defaults,
+/// and register gradient definitions in `em`.
+fn apply_style(el: &mut impl svg::Node, style: &Style, path: &BezPath, em: &mut Emitter) {
     let opacity = unit(style.opacity);
-    let stroke = stroke_of(style);
-    match style.fill {
-        Some(c) => paint(el, "fill", c),
+    match fill_of(style) {
+        Some(p) => paint_with(el, "fill", p, em),
         None => el.assign("fill", "none"),
     }
-    if let Some(c) = stroke {
-        paint(el, "stroke", c);
+    if let Some(mut p) = stroke_of(style) {
+        // A bounding-box gradient on a path with a zero-width or zero-height box (a straight
+        // horizontal or vertical stroke) paints nothing in SVG: draw its mean colour.
+        if bbox_units(p) {
+            let bb = kurbo::Shape::bounding_box(path);
+            if (bb.width() <= 0.0 || bb.height() <= 0.0)
+                && let Some(c) = style.stroke_paint.as_ref().and_then(Paint::mean_color)
+            {
+                p = Resolved::Solid(c);
+            }
+        }
+        paint_with(el, "stroke", p, em);
         if style.stroke_width != 1.0 {
             el.assign("stroke-width", fmt_num(style.stroke_width));
         }
@@ -301,6 +396,59 @@ fn apply_style(el: &mut impl svg::Node, style: &Style) {
     if opacity < 1.0 {
         el.assign("opacity", fmt_num(opacity));
     }
+}
+
+/// `true` for a gradient in bounding-box units.
+fn bbox_units(p: Resolved<'_>) -> bool {
+    match p {
+        Resolved::Solid(_) => false,
+        Resolved::Linear(g) => g.units == GradientUnits::BoundingBox,
+        Resolved::Radial(g) => g.units == GradientUnits::BoundingBox,
+    }
+}
+
+/// Set `attr` (fill/stroke) to the paint: a colour, or a reference to a shared gradient.
+fn paint_with(el: &mut impl svg::Node, attr: &str, p: Resolved<'_>, em: &mut Emitter) {
+    let (mut grad, stops, units) = match p {
+        Resolved::Solid(c) => return paint(el, attr, c),
+        Resolved::Linear(g) => {
+            let mut e = Element::new("linearGradient");
+            e.assign("x1", fmt_num(g.start.x));
+            e.assign("y1", fmt_num(g.start.y));
+            e.assign("x2", fmt_num(g.end.x));
+            e.assign("y2", fmt_num(g.end.y));
+            (e, &g.stops, g.units)
+        }
+        Resolved::Radial(g) => {
+            let mut e = Element::new("radialGradient");
+            e.assign("cx", fmt_num(g.center.x));
+            e.assign("cy", fmt_num(g.center.y));
+            e.assign("r", fmt_num(g.radius));
+            if let Some(f) = g.focal {
+                e.assign("fx", fmt_num(f.x));
+                e.assign("fy", fmt_num(f.y));
+            }
+            (e, &g.stops, g.units)
+        }
+    };
+    if units == GradientUnits::UserSpace {
+        grad.assign("gradientUnits", "userSpaceOnUse");
+    }
+    // Offsets clamped to [0, 1] and made non-decreasing, as SVG would interpret them.
+    let mut last = 0.0_f64;
+    for &(o, c) in stops.iter().filter(|(o, _)| o.is_finite()) {
+        last = o.clamp(0.0, 1.0).max(last);
+        let mut stop = Element::new("stop");
+        stop.assign("offset", fmt_num(last));
+        stop.assign("stop-color", c.to_hex());
+        let a = unit(c.a);
+        if a < 1.0 {
+            stop.assign("stop-opacity", fmt_num(a));
+        }
+        grad.append(stop);
+    }
+    let id = em.gradient(grad);
+    el.assign(attr, format!("url(#g{id})"));
 }
 
 /// Set `attr` (fill/stroke) to the colour, plus `attr-opacity` when alpha is below 1.
@@ -497,7 +645,7 @@ fn fmt_dec(x: f64, prec: usize) -> String {
 
 /// Make a user-supplied id a valid XML name: keep `[A-Za-z0-9_.:-]`, replace anything else
 /// with `_`, and prefix `_` if it does not start with a letter or underscore or if it looks
-/// like a generated id (`clipN`, `pN`), which it would otherwise shadow.
+/// like a generated id (`clipN`, `pN`, `gN`), which it would otherwise shadow.
 fn sanitize_id(id: &str) -> Option<String> {
     if id.is_empty() {
         return None;
@@ -512,7 +660,7 @@ fn sanitize_id(id: &str) -> Option<String> {
             }
         })
         .collect();
-    let generated = ["clip", "p"].iter().any(|prefix| {
+    let generated = ["clip", "p", "g"].iter().any(|prefix| {
         s.strip_prefix(prefix)
             .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     });
@@ -669,6 +817,8 @@ mod tests {
         assert_eq!(sanitize_id("clip").unwrap(), "clip");
         assert_eq!(sanitize_id("clip1a").unwrap(), "clip1a");
         assert_eq!(sanitize_id("p3").unwrap(), "_p3");
+        assert_eq!(sanitize_id("g12").unwrap(), "_g12");
+        assert_eq!(sanitize_id("glade").unwrap(), "glade");
         assert_eq!(sanitize_id("plant").unwrap(), "plant");
     }
 
@@ -749,6 +899,60 @@ mod tests {
         );
         let s = to_svg_string(&scene);
         assert!(!s.contains("<path") && !s.contains("NaN"), "{s}");
+    }
+
+    #[test]
+    fn gradient_markup() {
+        let red = Color::rgb(1.0, 0.0, 0.0);
+        let blue = Color::rgba(0.0, 0.0, 1.0, 0.5);
+        let lin = Paint::linear((0.0, 0.0), (1.0, 0.0), [(0.0, red), (1.0, blue)]);
+        let mut rad = Paint::radial((0.5, 0.5), 0.5, [(0.2, red), (0.1, blue), (2.0, red)])
+            .with_units(GradientUnits::UserSpace);
+        if let Paint::Radial(g) = &mut rad {
+            g.focal = Some(Point::new(0.25, 0.5));
+        }
+        let mut scene = Scene::new(10.0, 10.0);
+        scene.push(Node::path(square(0.0, 0.0, 2.0), Style::fill_gradient(rad)));
+        scene.push(Node::path(square(3.0, 0.0, 2.0), Style::fill_gradient(lin)));
+        let s = to_svg_string(&scene);
+        assert!(
+            s.contains(
+                r##"<radialGradient cx="0.5" cy="0.5" fx="0.25" fy="0.5" gradientUnits="userSpaceOnUse" id="g0" r="0.5">"##
+            ),
+            "{s}"
+        );
+        // Offsets clamped and non-decreasing; alpha as stop-opacity.
+        assert!(
+            s.contains(r#"offset="0.2""#) && !s.contains(r#"offset="0.1""#),
+            "{s}"
+        );
+        assert!(s.contains(r#"offset="1""#), "{s}");
+        assert!(s.contains(r#"stop-opacity="0.5""#), "{s}");
+        assert!(
+            s.contains(r#"<linearGradient id="g1" x1="0" x2="1" y1="0" y2="0">"#),
+            "{s}"
+        );
+        assert!(!s.contains("objectBoundingBox"), "{s}");
+        assert!(s.contains(r##"fill="url(#g0)""##) && s.contains(r##"fill="url(#g1)""##));
+
+        // A bbox gradient on a horizontal line stroke would vanish: drawn as a colour.
+        let mut line = BezPath::new();
+        line.move_to((0.0, 1.0));
+        line.line_to((5.0, 1.0));
+        let st = Style::stroke(red, 1.0).with_stroke_paint(Paint::shade(red, 0.1, 0.1, 0.0));
+        let s = path_element(&line, &st).unwrap().to_string();
+        assert!(s.contains(r##"stroke="#"##) && !s.contains("url("), "{s}");
+        // Bad gradients: no stops paint nothing; non-finite geometry falls back to a colour.
+        let empty = Style::fill_gradient(Paint::linear((0.0, 0.0), (1.0, 0.0), []));
+        assert!(path_element(&square(0.0, 0.0, 1.0), &empty).is_none());
+        let nan = Paint::linear((f64::NAN, 0.0), (1.0, 0.0), [(0.0, red), (1.0, red)]);
+        let s = path_element(&square(0.0, 0.0, 1.0), &Style::fill_gradient(nan))
+            .unwrap()
+            .to_string();
+        assert!(
+            s.contains(r##"fill="#ff0000""##) && !s.contains("NaN"),
+            "{s}"
+        );
     }
 
     #[test]
