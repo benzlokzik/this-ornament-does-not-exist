@@ -34,17 +34,21 @@ use super::foliage::{
     LeafStyle, finite_or, fit_to_box, leaf_at, leaf_motif, rotate, sane_accuracy, stalk, tapered,
 };
 use crate::geom::curl::{organic_curve, whiplash};
+use crate::geom::fit::fit_curve;
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::ribbon::{Ribbon, WidthProfile};
 use crate::geom::spiral::spiral_tail;
 use crate::geom::validate::{path_is_finite, sanitize};
-use crate::geom::{Composite, Curve, CurveExt, Surface, lerp};
+use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp};
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
 use crate::scene::{Color, LineCap, Node, Style};
-use kurbo::{Affine, BezPath, CubicBez, Point, Vec2};
+use kurbo::{Affine, BezPath, CubicBez, PathEl, Point, Vec2};
 use std::cell::{Cell, RefCell};
 use std::f64::consts::{PI, TAU};
+
+/// Fitting tolerance of the light band along a stem, as a fraction of the stem width.
+const BAND_TOLERANCE: f64 = 0.02;
 
 /// Deepest branching level grown, whatever the parameters ask for.
 pub const MAX_LEVELS: usize = 5;
@@ -1135,7 +1139,7 @@ fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
         stem.curve.clone(),
         WidthProfile::custom(move |u| stem_half(w0, u)),
     );
-    let outline = ribbon.outline(acc);
+    let outline = stem_outline(&ribbon, &stem.curve, acc);
     if outline.elements().len() < 3 {
         return Node::empty();
     }
@@ -1147,14 +1151,14 @@ fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
     } else {
         -1.0
     };
-    const N: usize = 64;
-    let mut band = BezPath::new();
-    band.move_to(ribbon.point(0.0, lit * 0.12));
-    for i in 0..=N {
-        band.line_to(ribbon.point(i as f64 / N as f64, lit * 0.12));
-    }
-    for i in (0..=N).rev() {
-        band.line_to(ribbon.point(i as f64 / N as f64, lit * 0.62));
+    let tol = acc.max(BAND_TOLERANCE * w0);
+    let mut band = fit_curve(&FnCurve(|u: f64| ribbon.point(u, lit * 0.12)), tol);
+    let back = fit_curve(&FnCurve(|u: f64| ribbon.point(1.0 - u, lit * 0.62)), tol);
+    for el in back.elements() {
+        match *el {
+            PathEl::MoveTo(p) => band.line_to(p),
+            other => band.push(other),
+        }
     }
     band.close_path();
     let band = sanitize(&band, 1e-9);
@@ -1169,6 +1173,47 @@ fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
         Style::stroke(style.ink, 0.22 * w0).with_cap(LineCap::Round),
     ));
     g
+}
+
+/// Closed outline of a stem ribbon: both edges fitted within `acc` with the crate's
+/// Schneider fitter, closed at each end by two quarter-ellipse cubics as in
+/// [`Ribbon::outline`](Surface::outline). The ribbon's own fitter bisects by parametric
+/// error over an arc-length table and needs thousands of segments on a long stem.
+fn stem_outline(ribbon: &Ribbon<Composite>, centerline: &Composite, acc: f64) -> BezPath {
+    const KAPPA: f64 = 0.552_284_749_830_793_4;
+    let left = fit_curve(&FnCurve(|u: f64| ribbon.point(u, 1.0)), acc);
+    let right = fit_curve(&FnCurve(|u: f64| ribbon.point(1.0 - u, -1.0)), acc);
+    if left.elements().len() < 2 || right.elements().len() < 2 {
+        return BezPath::new();
+    }
+    // Half-ellipse from edge point `p` round the tip `m + dir·e` to edge point `q`.
+    let cap = |path: &mut BezPath, dir: Vec2, p: Point, q: Point| {
+        let m = p.midpoint(q);
+        let a = p - m;
+        let e = a.hypot();
+        if e <= 0.5 * acc {
+            path.line_to(q);
+            return;
+        }
+        let b = m + dir * e;
+        path.curve_to(p + dir * (e * KAPPA), b + a * KAPPA, b);
+        path.curve_to(b - a * KAPPA, q + dir * (e * KAPPA), q);
+    };
+    let first = |p: &BezPath| match p.elements().first() {
+        Some(PathEl::MoveTo(q)) => *q,
+        _ => Point::ZERO,
+    };
+    let last = |p: &BezPath| p.elements().last().and_then(|el| el.end_point());
+    let (Some(l1), Some(r0)) = (last(&left), last(&right)) else {
+        return BezPath::new();
+    };
+    let (l0, r1) = (first(&left), first(&right));
+    let mut out = left;
+    cap(&mut out, centerline.tangent(1.0), l1, r1);
+    out.extend(right.elements().iter().skip(1).copied());
+    cap(&mut out, -centerline.tangent(0.0), r0, l0);
+    out.close_path();
+    sanitize(&out, 1e-9)
 }
 
 /// A young frond still rolled up (a crozier): a short stem from `base` along `dir` that

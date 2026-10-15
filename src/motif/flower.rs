@@ -18,6 +18,7 @@
 //! [`CenterStyle`]. [`flower`] assembles them with per-petal jitter drawn from a
 //! [`SeedTree`], and [`variants`] offers named, seed-randomised species.
 
+use crate::geom::fit::fit_points;
 use crate::geom::validate::sanitize;
 use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp, smoothstep, unlerp};
 use crate::palette::Palette;
@@ -28,6 +29,9 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 /// Segments shorter than this are dropped from every produced path.
 const MIN_SEG: f64 = 1e-7;
+/// Fitting tolerance of detail lines (veins, hatching, base shading) as a fraction of the
+/// petal size: far below their stroke widths, so the fit is invisible.
+const DETAIL_TOLERANCE: f64 = 0.002;
 /// Exponent of the curl profile `θ(s) = curl · (s/L)^BEND_EXP`: > 1 keeps the base straight
 /// and concentrates the bend towards the tip, like a real petal.
 const BEND_EXP: f64 = 1.6;
@@ -243,7 +247,8 @@ impl Petal {
             &FnCurve(|t: f64| self.point(top(1.0) * (1.0 - t), 1.0)),
             accuracy,
         );
-        let (side_l, arch, side_r) = (spline(&side_l), spline(&arch), spline(&side_r));
+        let fit = |pts: &[Point]| spline(pts, accuracy);
+        let (side_l, arch, side_r) = (fit(&side_l), fit(&arch), fit(&side_r));
         closed_concat(&[side_l, arch, side_r])
     }
 }
@@ -268,7 +273,10 @@ impl Surface for Petal {
             // Adaptive fitting of a rippled edge is slow (every crest is a split candidate);
             // a spline through ~20 samples per ripple period is just as smooth.
             let n = (w.cycles / (1.0 - w.start) * 20.0).clamp(32.0, 400.0) as usize;
-            return closed_concat(&[spline(&sample(&right, n)), spline(&sample(&left, n))]);
+            return closed_concat(&[
+                spline(&sample(&right, n), acc),
+                spline(&sample(&left, n), acc),
+            ]);
         }
         // The fit occasionally returns a cubic that starts by doubling back (a cusp within
         // the tolerance) on bent edges; such an edge is splined from samples instead.
@@ -279,7 +287,7 @@ impl Surface for Petal {
             }
             let len = self.params.length + self.params.width;
             let n = ((len / acc).sqrt() * 4.0).clamp(32.0, 400.0) as usize;
-            spline(&sample(c, n))
+            spline(&sample(c, n), acc)
         };
         closed_concat(&[edge(&right), edge(&left)])
     }
@@ -682,13 +690,14 @@ fn reverses(path: &BezPath) -> bool {
     false
 }
 
-/// Smooth path through `curve` sampled at `n` uniform parameters (Catmull-Rom spline).
+/// Smooth path through the samples `pts` of a curve, fitted within `tolerance`.
 ///
-/// Detail lines are thin and smooth, so a spline through a few dozen samples is visually
-/// exact and orders of magnitude cheaper than adaptive fitting of a numerically
-/// differentiated curve; only petal outlines use [`CurveExt::to_bezpath`].
-fn spline(pts: &[Point]) -> BezPath {
-    Composite::through_points(pts, 0.5).map_or_else(BezPath::new, |c| c.to_bezpath_exact())
+/// Detail lines are thin and smooth, so fitting a few dozen samples is visually exact and
+/// much cheaper than adaptive fitting of a numerically differentiated curve; a smooth line
+/// needs a handful of cubics instead of one per sample. Only petal outlines use
+/// [`CurveExt::to_bezpath`].
+fn spline(pts: &[Point], tolerance: f64) -> BezPath {
+    fit_points(pts, tolerance)
 }
 
 /// Number of samples for a detail line of length `len`: about one per `12 · accuracy`.
@@ -732,7 +741,7 @@ fn tapered(curve: &dyn Curve, width: impl Fn(f64) -> f64, accuracy: f64) -> BezP
         side_b.push(p - normal * half);
     }
     side_b.reverse();
-    closed_concat(&[spline(&side_a), spline(&side_b)])
+    closed_concat(&[spline(&side_a, accuracy), spline(&side_b, accuracy)])
 }
 
 /// A curve given in `(u, v)` parameter space (as a quadratic), mapped through the surface.
@@ -789,9 +798,9 @@ fn vein_plan(profile: PetalProfile) -> VeinPlan {
 /// All detail geometry of a petal in petal-local coordinates (unclipped).
 fn petal_detail(seed: &SeedTree, petal: &Petal, accuracy: f64) -> Vec<(BezPath, Ink)> {
     let mut rng = seed.child("veins").rng();
-    let acc = sane_accuracy(accuracy);
     let p = petal.params();
     let size = petal.size();
+    let acc = sane_accuracy(accuracy).max(DETAIL_TOLERANCE * size);
     let aspect = p.width / p.length;
     let (w_mid, w_lat, w_fork, w_hatch) = (0.02 * size, 0.011 * size, 0.007 * size, 0.006 * size);
     let mut out = Vec::new();
@@ -1272,7 +1281,8 @@ fn center_node(seed: &SeedTree, center: &CenterStyle, style: &FlowerStyle, acc: 
                     at(reach, a + bend),
                 );
                 let w = (0.05 * length).max(0.01 * radius);
-                let stalk = tapered(&q, |t| w * (1.0 - 0.5 * t), acc);
+                let tol = acc.max(DETAIL_TOLERANCE * length);
+                let stalk = tapered(&q, |t| w * (1.0 - 0.5 * t), tol);
                 if !stalk.elements().is_empty() {
                     nodes.push(Node::path(
                         stalk,
@@ -1641,9 +1651,15 @@ mod tests {
         FlowerStyle::from_palette(&crate::palette::all()[0], true, 0.4)
     }
 
-    fn sample_points(path: &BezPath, per_seg: usize) -> Vec<Point> {
+    /// About one sample per `step` of arc length, so the result does not depend on how
+    /// many segments the fit chose.
+    fn sample_by_length(path: &BezPath, step: f64) -> Vec<Point> {
+        use kurbo::ParamCurveArclen;
         path.segments()
-            .flat_map(|seg| (0..per_seg).map(move |i| seg.eval(i as f64 / per_seg as f64)))
+            .flat_map(|seg| {
+                let n = (seg.arclen(1e-3) / step).ceil().max(1.0) as usize;
+                (0..n).map(move |i| seg.eval(i as f64 / n as f64))
+            })
             .collect()
     }
 
@@ -1721,7 +1737,7 @@ mod tests {
                     // Shading regions share the petal edges by construction.
                     continue;
                 }
-                for pt in sample_points(path, 4) {
+                for pt in sample_by_length(path, 0.5) {
                     total += 1;
                     inside += usize::from(outline.winding(pt) != 0);
                 }

@@ -18,7 +18,10 @@ use kurbo::{BezPath, CubicBez, ParamCurve, ParamCurveDeriv, Point, Vec2};
 pub const CORNER_ANGLE: f64 = 75.0 * std::f64::consts::PI / 180.0;
 
 /// Maximum Newton–Raphson reparameterisation rounds before splitting.
-const MAX_REPARAM: usize = 20;
+const MAX_REPARAM: usize = 50;
+/// Reparameterisation stops early once a round fails to shrink the squared error below
+/// this fraction of the previous one.
+const REPARAM_PROGRESS: f64 = 0.98;
 /// Depth after which [`fit_cubic`] splits runs in half instead of at the worst point, which
 /// bounds the recursion by `MAX_DEPTH + log₂(n)`.
 const MAX_DEPTH: usize = 48;
@@ -455,7 +458,7 @@ fn fit_run(pts: &[Point], t1: Option<Vec2>, t2: Option<Vec2>, tol: f64, path: &m
 }
 
 /// Schneider's recursive step: least-squares fit with fixed end tangents, improve the
-/// parameterisation with Newton–Raphson while the error is moderate, otherwise split at the
+/// parameterisation with Newton–Raphson while that keeps shrinking the error, otherwise split at the
 /// worst point with a shared (central-difference) tangent so the halves join G1.
 fn fit_cubic(pts: &[Point], t1: Vec2, t2: Vec2, tol: f64, depth: usize, path: &mut BezPath) {
     let n = pts.len();
@@ -477,14 +480,20 @@ fn fit_cubic(pts: &[Point], t1: Vec2, t2: Vec2, tol: f64, depth: usize, path: &m
         path.curve_to(bez.p1, bez.p2, bez.p3);
         return;
     }
-    if !closed && err < tol2 * 4.0 {
+    // Chord-length parameters are far off on runs whose speed varies (a cubic S-curve), so
+    // reparameterise even when the first error is large; stop once it no longer improves.
+    if !closed {
         for _ in 0..MAX_REPARAM {
             reparameterize(pts, &mut u, &bez);
             bez = generate_bezier(pts, &u, t1, t2);
+            let prev = err;
             (err, split) = max_error(pts, &bez, &u);
             if err < tol2 {
                 path.curve_to(bez.p1, bez.p2, bez.p3);
                 return;
+            }
+            if err > REPARAM_PROGRESS * prev {
+                break;
             }
         }
     }
@@ -811,6 +820,26 @@ pub(crate) mod tests {
         let dot = FnCurve(|_t: f64| Point::new(1.0, 2.0));
         assert!(fit_curve(&dot, 0.1).elements().is_empty());
         assert_eq!(fit_curve(&spiral, 0.1), fit_curve(&spiral, 0.1));
+    }
+
+    #[test]
+    fn smooth_s_curves_need_few_segments() {
+        use crate::geom::FnCurve;
+        let cubic = CubicBez::new((0.0, 0.0), (150.0, -120.0), (50.0, 220.0), (200.0, 100.0));
+        let sine =
+            FnCurve(|t: f64| Point::new(300.0 * t, 60.0 * (std::f64::consts::TAU * t).sin()));
+        let dense = |c: &dyn Curve| -> Vec<Point> {
+            (0..=2000).map(|i| c.point(i as f64 / 2000.0)).collect()
+        };
+        for (c, max) in [(&cubic as &dyn Curve, 2), (&sine, 8)] {
+            let path = fit_curve(c, 0.1);
+            assert!(
+                path.segments().count() <= max,
+                "{} segments",
+                path.segments().count()
+            );
+            assert!(max_dist_to_path(&dense(c), &path) < 0.15);
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@
 //! length. Where foliage motifs stack leaves, each leaf casts a thin shadow line on the
 //! leaves under it.
 
+use crate::geom::fit::{fit_curve, fit_points};
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::validate::sanitize;
 use crate::geom::{Composite, Curve, CurveExt, FnCurve, Surface, lerp};
@@ -35,6 +36,9 @@ use std::f64::consts::PI;
 const MIN_SEG: f64 = 1e-7;
 /// Leaves longer than this (canvas units) get secondary veinlets.
 const VEINLET_MIN_LENGTH: f64 = 60.0;
+/// Fitting tolerance of detail lines (veins, hatching, tonal bands) as a fraction of the
+/// leaf length: far below their stroke widths, so the fit is invisible.
+const DETAIL_TOLERANCE: f64 = 0.002;
 /// Fraction of the box left free on each side by [`fit_to_box`] in [`variants`].
 const MARGIN: f64 = 0.08;
 
@@ -125,10 +129,14 @@ pub fn leaf_motif<C: Curve>(
 ) -> Node {
     let acc = sane_accuracy(accuracy);
     let len = leaf.length();
-    let outline = sanitize(&leaf.outline(acc), MIN_SEG);
-    if !(len.is_finite() && len > 1e-6) || outline.elements().len() < 3 {
+    if !(len.is_finite() && len > 1e-6) {
         return Node::empty();
     }
+    let outline = leaf_outline(leaf, acc);
+    if outline.elements().len() < 3 {
+        return Node::empty();
+    }
+    let tol = acc.max(DETAIL_TOLERANCE * len);
     let w = style.widths;
     // A frond's outline runs round many small pinnae; a full-weight line would clog them.
     let outline_width = w.outline
@@ -143,7 +151,7 @@ pub fn leaf_motif<C: Curve>(
     let dark_side = if rng.chance(0.5) { 1.0 } else { -1.0 };
 
     let mut detail = Vec::new();
-    let lit = half_blade(leaf, -dark_side);
+    let lit = half_blade(leaf, -dark_side, tol);
     if !lit.elements().is_empty() {
         detail.push(Node::path(lit, Style::fill(style.fill_light)));
     }
@@ -152,7 +160,7 @@ pub fn leaf_motif<C: Curve>(
     // hatching: the blade turns away from the light there.
     let shade = style.fill.mix(style.ink, 0.45);
     for (v0, opacity) in [(0.5, 0.3), (0.75, 0.35)] {
-        let band = blade_band(leaf, dark_side * v0, dark_side);
+        let band = blade_band(leaf, dark_side * v0, dark_side, tol);
         if !band.elements().is_empty() {
             detail.push(Node::path(band, Style::fill(shade).with_opacity(opacity)));
         }
@@ -170,7 +178,7 @@ pub fn leaf_motif<C: Curve>(
             width: 0.6,
         },
     };
-    let lines = hatch(leaf, &opts, &seed.child("leaf-hatch"), acc);
+    let lines = hatch(leaf, &opts, &seed.child("leaf-hatch"), tol);
     let merged = merge(&lines);
     if !merged.elements().is_empty() {
         let s = Style::stroke(style.ink.mix(style.fill, 0.25), w.hatch * len)
@@ -183,7 +191,7 @@ pub fn leaf_motif<C: Curve>(
     // on the shaded half, where a dark line would vanish into the hatching.
     let (mut dark, mut light) = (Vec::new(), Vec::new());
     for v in leaf_veins(seed, leaf, &w) {
-        let p = vein_path(leaf, &v, acc);
+        let p = vein_path(leaf, &v, tol);
         if p.elements().is_empty() {
             continue;
         }
@@ -411,28 +419,54 @@ fn run<C: Curve>(leaf: &Leaf<C>, u: f64, v: f64, angle: f64) -> f64 {
 }
 
 /// The closed region of the blade between the midrib and the edge `v = side`.
-fn half_blade<C: Curve>(leaf: &Leaf<C>, side: f64) -> BezPath {
-    blade_band(leaf, 0.0, side)
+fn half_blade<C: Curve>(leaf: &Leaf<C>, side: f64, tolerance: f64) -> BezPath {
+    blade_band(leaf, 0.0, side, tolerance)
 }
 
-/// The closed region of the blade between the contours `v = a` and `v = b`.
-fn blade_band<C: Curve>(leaf: &Leaf<C>, a: f64, b: f64) -> BezPath {
-    const N: usize = 160;
-    let mut path = BezPath::new();
-    path.move_to(leaf.point(0.0, a));
-    for i in 0..=N {
-        path.line_to(leaf.point(i as f64 / N as f64, b));
-    }
-    for i in (0..N).rev() {
-        path.line_to(leaf.point(i as f64 / N as f64, a));
-    }
-    path.close_path();
-    let p = sanitize(&path, 1e-6);
+/// The closed region of the blade between the contours `v = a` and `v = b`, both fitted
+/// within `tolerance`.
+fn blade_band<C: Curve>(leaf: &Leaf<C>, a: f64, b: f64, tolerance: f64) -> BezPath {
+    let outer = fit_curve(&FnCurve(|u: f64| leaf.point(u, b)), tolerance);
+    let inner = fit_curve(&FnCurve(|u: f64| leaf.point(1.0 - u, a)), tolerance);
+    let p = sanitize(&join_closed(&[outer, inner]), 1e-6);
     if crate::geom::validate::path_is_finite(&p) {
         p
     } else {
         BezPath::new()
     }
+}
+
+/// The closed outline of `leaf`: both edges fitted within `accuracy` and joined at the base
+/// and the tip.
+///
+/// The same edges as [`Leaf::outline`](Surface::outline), fitted with the crate's Schneider
+/// fitter, which needs about a third of the segments of the ribbon fitter's bisection.
+pub(crate) fn leaf_outline<C: Curve>(leaf: &Leaf<C>, accuracy: f64) -> BezPath {
+    let acc = sane_accuracy(accuracy);
+    let left = fit_curve(&FnCurve(|u: f64| leaf.point(u, 1.0)), acc);
+    let right = fit_curve(&FnCurve(|u: f64| leaf.point(1.0 - u, -1.0)), acc);
+    let p = sanitize(&join_closed(&[left, right]), MIN_SEG);
+    if crate::geom::validate::path_is_finite(&p) && p.elements().len() > 3 {
+        p
+    } else {
+        BezPath::new()
+    }
+}
+
+/// Concatenate open paths into one closed path, bridging gaps with straight lines.
+fn join_closed(parts: &[BezPath]) -> BezPath {
+    let mut out = BezPath::new();
+    for el in parts.iter().flat_map(|p| p.elements()) {
+        match *el {
+            kurbo::PathEl::MoveTo(p) if !out.elements().is_empty() => out.line_to(p),
+            kurbo::PathEl::ClosePath => {}
+            other => out.push(other),
+        }
+    }
+    if !out.elements().is_empty() {
+        out.close_path();
+    }
+    out
 }
 
 /// A vein mapped through the leaf surface as a filled tapering line.
@@ -478,8 +512,8 @@ pub(crate) fn finite_or(x: f64, default: f64) -> f64 {
     if x.is_finite() { x } else { default }
 }
 
-/// A filled engraving line along `curve` whose full width at parameter `t` is `width(t)`.
-/// Empty for a (near) zero-length or non-finite curve.
+/// A filled engraving line along `curve` whose full width at parameter `t` is `width(t)`,
+/// its sides fitted within `accuracy`. Empty for a (near) zero-length or non-finite curve.
 pub(crate) fn tapered(curve: &dyn Curve, width: impl Fn(f64) -> f64, accuracy: f64) -> BezPath {
     let coarse: Vec<Point> = (0..=8).map(|i| curve.point(i as f64 / 8.0)).collect();
     let len: f64 = coarse.windows(2).map(|w| (w[1] - w[0]).hypot()).sum();
@@ -490,11 +524,16 @@ pub(crate) fn tapered(curve: &dyn Curve, width: impl Fn(f64) -> f64, accuracy: f
     let pts: Vec<Point> = (0..n)
         .map(|i| curve.point(i as f64 / (n - 1) as f64))
         .collect();
-    tapered_points(&pts, |i| width(i as f64 / (n - 1) as f64))
+    tapered_points(&pts, |i| width(i as f64 / (n - 1) as f64), accuracy)
 }
 
-/// A filled line through `pts` with full width `width(i)` at point `i`.
-pub(crate) fn tapered_points(pts: &[Point], width: impl Fn(usize) -> f64) -> BezPath {
+/// A filled line through `pts` with full width `width(i)` at point `i`, its two sides
+/// fitted within `tolerance` (a smooth line needs a few cubics, not one per sample).
+pub(crate) fn tapered_points(
+    pts: &[Point],
+    width: impl Fn(usize) -> f64,
+    tolerance: f64,
+) -> BezPath {
     let n = pts.len();
     if n < 2 || pts.iter().any(|p| !p.is_finite()) {
         return BezPath::new();
@@ -512,20 +551,12 @@ pub(crate) fn tapered_points(pts: &[Point], width: impl Fn(usize) -> f64) -> Bez
         b.push(p - normal * half);
     }
     b.reverse();
-    let spline = |pts: &[Point]| {
-        Composite::through_points(pts, 0.5).map_or_else(BezPath::new, |c| c.to_bezpath_exact())
-    };
-    let (sa, sb) = (spline(&a), spline(&b));
-    let mut out = sa.clone();
-    for el in sb.elements() {
-        match *el {
-            // Join the two sides with a line across the end (dropped by sanitize if empty).
-            kurbo::PathEl::MoveTo(p) => out.line_to(p),
-            other => out.push(other),
-        }
-    }
-    out.close_path();
-    sanitize(&out, MIN_SEG)
+    let tol = sane_accuracy(tolerance);
+    // Join the two sides with a line across the end (dropped by sanitize if empty).
+    sanitize(
+        &join_closed(&[fit_points(&a, tol), fit_points(&b, tol)]),
+        MIN_SEG,
+    )
 }
 
 /// Midrib of a leaf growing from `base` along `direction` (bent gently to one side),
@@ -901,7 +932,7 @@ impl Stacked {
     fn new<C: Curve>(leaf: &Leaf<C>, node: Node, acc: f64) -> Stacked {
         Stacked {
             node,
-            outline: sanitize(&leaf.outline(acc), MIN_SEG),
+            outline: leaf_outline(leaf, acc),
             length: leaf.length(),
         }
     }
