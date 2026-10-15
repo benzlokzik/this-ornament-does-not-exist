@@ -1,20 +1,36 @@
 //! `orna` command line interface.
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::builder::styling::{AnsiColor, Styles};
+use clap::{ColorChoice, Parser, Subcommand};
 use orna::compose::gallery::{self, GalleryOptions};
 use orna::config::{Config, Preset};
 use orna::render;
 use orna::scene::Scene;
+use owo_colors::OwoColorize;
 use std::path::{Path, PathBuf};
+
+/// Help output theme: green headers, cyan literals, red errors.
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default())
+    .error(AnsiColor::Red.on_default().bold())
+    .valid(AnsiColor::Green.on_default())
+    .invalid(AnsiColor::Yellow.on_default());
 
 #[derive(Parser, Debug)]
 #[command(
     name = "orna",
     version,
-    about = "Procedural Art Nouveau botanical illustrations"
+    about = "Procedural Art Nouveau botanical illustrations",
+    styles = STYLES
 )]
 struct Cli {
+    /// When to colour the output (`NO_COLOR` and `CLICOLOR_FORCE` are honoured too).
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
     #[command(subcommand)]
     command: Command,
 }
@@ -85,9 +101,25 @@ enum Command {
     Palettes,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let cli = Cli::parse();
-    match cli.command {
+    match cli.color {
+        ColorChoice::Auto => anstream::ColorChoice::Auto,
+        ColorChoice::Always => anstream::ColorChoice::Always,
+        ColorChoice::Never => anstream::ColorChoice::Never,
+    }
+    .write_global();
+    if let Err(e) = run(cli.command) {
+        anstream::eprintln!("{} {e}", "error:".red().bold());
+        for cause in e.chain().skip(1) {
+            anstream::eprintln!("  {} {cause}", "caused by:".dimmed());
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(command: Command) -> anyhow::Result<()> {
+    match command {
         Command::Gallery {
             seed,
             output,
@@ -169,19 +201,21 @@ fn main() -> anyhow::Result<()> {
                 create_parent(&p)?;
                 std::fs::write(&p, serde_json::to_string_pretty(&cfg)?)
                     .with_context(|| format!("writing {}", p.display()))?;
-                println!("wrote {}", p.display());
+                anstream::println!("{} {}", "wrote".green().bold(), p.display());
             }
             write_outputs(&scene, &output, scale, single)
         }
         Command::Palettes => {
+            let swatches =
+                anstream::AutoStream::choice(&std::io::stdout()) != anstream::ColorChoice::Never;
             for p in orna::palette::all() {
-                println!(
-                    "{:12} bg {} ink {} warm {} cool {}",
-                    p.name,
-                    p.background,
-                    p.ink,
-                    join(&p.warm),
-                    join(&p.cool)
+                anstream::println!(
+                    "{} bg {} ink {} warm {} cool {}",
+                    format!("{:12}", p.name).bold(),
+                    swatch(p.background, swatches),
+                    swatch(p.ink, swatches),
+                    join(&p.warm, swatches),
+                    join(&p.cool, swatches)
                 );
             }
             Ok(())
@@ -189,11 +223,25 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn join(cs: &[orna::scene::Color]) -> String {
+/// The hex value of `c`, preceded by a terminal swatch (two spaces on `c` as background)
+/// when `swatches` is set.
+fn swatch(c: orna::scene::Color, swatches: bool) -> String {
+    if !swatches {
+        return c.to_string();
+    }
+    let q = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "{} {}",
+        "  ".on_truecolor(q(c.r), q(c.g), q(c.b)),
+        c.to_string().dimmed()
+    )
+}
+
+fn join(cs: &[orna::scene::Color], swatches: bool) -> String {
     cs.iter()
-        .map(|c| c.to_string())
+        .map(|&c| swatch(c, swatches))
         .collect::<Vec<_>>()
-        .join(",")
+        .join(" ")
 }
 
 /// Write SVG and PNG (unless `single`), choosing by the extension of `output`, creating
@@ -213,12 +261,12 @@ fn write_outputs(scene: &Scene, output: &Path, scale: f64, single: bool) -> anyh
     if !single || !want_png {
         render::write_svg(scene, &svg_path)
             .with_context(|| format!("writing {}", svg_path.display()))?;
-        println!("wrote {}", svg_path.display());
+        anstream::println!("{} {}", "wrote".green().bold(), svg_path.display());
     }
     if !single || want_png {
         render::write_png(scene, &png_path, scale)
             .with_context(|| format!("writing {}", png_path.display()))?;
-        println!("wrote {}", png_path.display());
+        anstream::println!("{} {}", "wrote".green().bold(), png_path.display());
     }
     Ok(())
 }

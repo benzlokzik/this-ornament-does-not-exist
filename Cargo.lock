@@ -489,10 +489,12 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "orna"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "anyhow",
  "clap",
  "kurbo",
  "noise",
+ "owo-colors",
  "palette",
  "rand 0.10.3",
  "rand_chacha",
@@ -503,6 +505,12 @@ dependencies = [
  "svg",
  "thiserror",
 ]
+
+[[package]]
+name = "owo-colors"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
 
 [[package]]
 name = "palette"
