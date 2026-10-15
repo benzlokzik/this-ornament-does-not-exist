@@ -1,8 +1,11 @@
 //! Layer 4 — composition and procedural growth: guide curves, vector fields, density
 //! masks, focal points, presets and the demonstration gallery.
 
+pub mod botanica;
 pub mod field;
 pub mod gallery;
+pub mod landscape;
+pub mod layout;
 pub mod preset;
 
 use crate::config::Config;
