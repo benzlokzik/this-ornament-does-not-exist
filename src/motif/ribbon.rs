@@ -1,11 +1,12 @@
 //! Ribbon motifs: tapered Art Nouveau ribbons engraved in layers.
 //!
 //! [`ribbon_motif`] turns a centreline and a pair of width profiles into a finished
-//! [`Node`]: a flat fill, a lighter highlight band along the lit side, nested contour
-//! stripes that follow the ribbon's own `(u, v)` parameterisation and taper into the tips,
-//! optional surface-following hatching on the shaded side, all clipped by the outline, and
-//! an ink outline on top. Stroke widths are proportional to the ribbon's widest half-width,
-//! so a motif reads the same at any scale.
+//! [`Node`] engraved in nested tonal bands: a mid-tone fill, a dark band along each edge, a
+//! light core on the lit (convex) side, hatch lines running along the ribbon on the shaded
+//! side, thin contour lines and an ink rim, all clipped by the outline, with a hairline
+//! outline on top. Bands and lines follow the ribbon's own `(u, v)` parameterisation with a
+//! thickness proportional to the local width, so they taper into tips and spiral eyes and
+//! a motif reads the same at any scale.
 //!
 //! Where a ribbon rolls into a spiral, its width is capped by a fraction of the local
 //! radius of curvature (see [`coiled`]): the width then shrinks with the radius, the turns
@@ -20,13 +21,15 @@ use crate::geom::fit::{fit_curve, stub};
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::ribbon::{Ribbon, RibbonReport, WidthProfile, ease};
 use crate::geom::spiral::{LogSpiral, spiral_tail};
+use crate::geom::surface::join_closed;
 use crate::geom::validate::{path_is_finite, sanitize};
-use crate::geom::{Composite, Curve, CurveExt, EPS, FnCurve, Surface, lerp};
-use crate::ornament::contour::nested;
-use crate::ornament::hatch::{HatchOptions, Shade, hatch};
+use crate::geom::{Composite, Curve, CurveExt, EPS, FnCurve, Surface, lerp, smoothstep};
+use crate::motif::foliage::{LeafStyle, leaf_motif};
+use crate::ornament::contour::{band, line_strips};
+use crate::ornament::fit_clean;
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
-use crate::scene::{Color, Node, Style};
+use crate::scene::{Color, LineCap, Node, Style};
 use kurbo::{Affine, BezPath, Circle, CubicBez, Point, Shape, Vec2};
 use std::f64::consts::PI;
 
@@ -42,26 +45,30 @@ fn finite_or(x: f64, fallback: f64) -> f64 {
 /// Colours and relative stroke widths of an engraved ribbon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RibbonStyle {
-    /// Flat body colour.
+    /// Mid-tone body colour.
     pub fill: Color,
-    /// Light band along the lit side.
+    /// Light core band along the lit side.
     pub highlight: Color,
     /// Outline ink.
     pub ink: Color,
-    /// Contour stripes and hatching.
+    /// Contour lines and hatching: a dark tone of the fill.
     pub stripe: Color,
-    /// Outline stroke width as a fraction of the ribbon's widest half-width.
+    /// Dark tonal bands along the edges.
+    pub shade: Color,
+    /// Hairline outline stroke width as a fraction of the ribbon's widest half-width (the
+    /// visible outline is thicker: an ink rim proportional to the local width).
     pub outline_width: f64,
-    /// Contour stripe stroke width as a fraction of the widest half-width.
+    /// Thickness of contour lines as a fraction of the local half-width.
     pub stripe_width: f64,
-    /// Hatching stroke width as a fraction of the widest half-width.
+    /// Thickness of hatch lines as a fraction of the local half-width.
     pub hatch_width: f64,
 }
 
 impl RibbonStyle {
     /// Derive a style from a palette: the body from the warm (`warm = true`) or cool ramp at
-    /// position `t ∈ [0, 1]` (dark → light), the highlight from the light end of the same
-    /// ramp mixed with the palette's paper colour, stripes from its dark end.
+    /// position `t ∈ [0, 1]` (dark → light), the edge bands from a darker step of the same
+    /// ramp, the highlight from its light end mixed with the palette's paper colour, lines
+    /// from its dark end mixed with ink.
     pub fn from_palette(palette: &Palette, warm: bool, t: f64) -> RibbonStyle {
         let t = finite_or(t, 0.5).clamp(0.0, 1.0);
         let ramp = |x: f64| {
@@ -72,13 +79,14 @@ impl RibbonStyle {
             }
         };
         RibbonStyle {
-            fill: ramp(lerp(0.2, 0.6, t)),
-            highlight: ramp(lerp(0.65, 1.0, t)).mix(palette.light, 0.45),
+            fill: ramp(lerp(0.25, 0.6, t)),
+            highlight: ramp(lerp(0.7, 1.0, t)).mix(palette.light, 0.5),
             ink: palette.ink,
-            stripe: ramp(lerp(0.0, 0.15, t)).mix(palette.ink, 0.35),
-            outline_width: 0.075,
-            stripe_width: 0.04,
-            hatch_width: 0.03,
+            stripe: ramp(lerp(0.0, 0.12, t)).mix(palette.ink, 0.4),
+            shade: ramp(lerp(0.05, 0.3, t)).mix(palette.ink, 0.12),
+            outline_width: 0.03,
+            stripe_width: 0.035,
+            hatch_width: 0.028,
         }
     }
 }
@@ -90,35 +98,44 @@ pub struct RibbonParams {
     pub left: WidthProfile,
     /// Half-width profile of the right side.
     pub right: WidthProfile,
-    /// Nested contour stripes per side (0 = none).
+    /// Contour lines per side, running inside the tonal bands (0 = none).
     pub stripes: usize,
-    /// Also draw the centre line (`v = 0`) as a stripe, like a midrib.
+    /// Also draw the centre line (`v = 0`) as a contour line, like a midrib.
     pub centre_stripe: bool,
-    /// Inset of the outermost stripe as a fraction of the half-width.
+    /// Spacing of the contour lines as a fraction of the half-width.
     pub stripe_inset: f64,
-    /// Draw a highlight band along the lit side.
+    /// Draw the light core band on the lit side.
     pub highlight: bool,
     /// Hatch the shaded side.
     pub hatch: bool,
-    /// Lit side: `+1` = left (`v > 0`), `-1` = right. The opposite side is hatched.
+    /// Lit side where the centreline runs straight: `+1` = left (`v > 0`), `-1` = right.
+    /// Where it bends, the convex side is lit, so the light flips across an S-curve.
     pub lit_side: f64,
     /// Lean of width bumps towards the end, see [`Ribbon::with_lean`].
     pub lean: f64,
+    /// Dark edge band as a fraction of the half-width (`0` = none; clamped to `[0, 0.6]`).
+    pub edge_band: f64,
+    /// Swallowtail notch cut into both ends, as a multiple of the end's half-width
+    /// (`0` = the ribbon's own caps; only open ends are notched).
+    pub notch: f64,
 }
 
 impl RibbonParams {
-    /// Two stripes per side, highlight and hatching on, lit on the left.
+    /// Two contour lines per side, tonal bands, highlight and hatching on, lit on the left
+    /// where straight, no notch.
     pub fn new(left: WidthProfile, right: WidthProfile) -> RibbonParams {
         RibbonParams {
             left,
             right,
             stripes: 2,
             centre_stripe: false,
-            stripe_inset: 0.18,
+            stripe_inset: 0.14,
             highlight: true,
             hatch: true,
             lit_side: 1.0,
             lean: 0.0,
+            edge_band: 0.24,
+            notch: 0.0,
         }
     }
 
@@ -150,10 +167,115 @@ pub fn ribbon_motif<C: Curve>(
     ribbon_layers(seed, &ribbon, params, style, accuracy)
 }
 
-/// The engraved layers of any surface (a [`Ribbon`], a leaf, a sub-band): fill, then the
-/// highlight band, hatching and contour stripes in a group clipped by the outline, then the
-/// ink outline. Only the ornament fields of `params` are used. Stroke widths are the
-/// style's fractions of the surface's widest half-width.
+/// Samples of the per-`u` lighting of a surface.
+const TONE_SAMPLES: usize = 256;
+
+/// Where a surface is lit: `lit(u) ∈ [-1, 1]` (`+1` = the left side `v > 0` is lit) and
+/// the relative half-width `hw(u) / W`, both tabulated on a uniform `u` grid.
+struct Tone {
+    lit: Vec<f64>,
+    rel: Vec<f64>,
+}
+
+impl Tone {
+    /// The convex side of the centreline (`v = 0`) is lit, as on a bent, satin band; where
+    /// it runs straight `lit_side` decides. The curvature is measured relative to the
+    /// widest half-width `wmax` and smoothed, so the light swaps sides gradually across an
+    /// inflection.
+    fn new<S: Surface + ?Sized>(surface: &S, lit_side: f64, wmax: f64) -> Tone {
+        let n = TONE_SAMPLES;
+        let pts: Vec<Point> = (0..=n)
+            .map(|i| surface.point(i as f64 / n as f64, 0.0))
+            .collect();
+        const H: usize = 3;
+        let mut k: Vec<f64> = (0..=n)
+            .map(|i| {
+                let (a, b, c) = (pts[i.saturating_sub(H)], pts[i], pts[(i + H).min(n)]);
+                let d = (b - a).hypot() * (c - b).hypot() * (c - a).hypot();
+                let m = 2.0 * (b - a).cross(c - a) / d;
+                if m.is_finite() { m } else { 0.0 }
+            })
+            .collect();
+        for _ in 0..3 {
+            k = box_blur(&k, 10);
+        }
+        let bias = 0.5 * if lit_side < 0.0 { -1.0 } else { 1.0 };
+        let lit = k.iter().map(|k| (bias - 7.0 * k * wmax).tanh()).collect();
+        let rel = (0..=n)
+            .map(|i| half_width_at(surface, i as f64 / n as f64) / wmax)
+            .collect();
+        Tone { lit, rel }
+    }
+
+    fn lit(&self, u: f64) -> f64 {
+        sample_table(&self.lit, u)
+    }
+
+    fn rel(&self, u: f64) -> f64 {
+        sample_table(&self.rel, u)
+    }
+
+    /// How deep side `side` (`±1`) lies in shadow at `u`, in `[0, 1]`.
+    fn shadow(&self, u: f64, side: f64) -> f64 {
+        0.5 * (1.0 - side * self.lit(u))
+    }
+}
+
+/// Half-width at `u` with non-finite values mapped to `0`.
+fn half_width_at<S: Surface + ?Sized>(surface: &S, u: f64) -> f64 {
+    let w = surface.half_width(u.clamp(0.0, 1.0));
+    if w.is_finite() { w.max(0.0) } else { 0.0 }
+}
+
+/// Outline of a surface, with a swallowtail notch `notch ×` the end half-width deep cut
+/// into each open end when `notch > 0`.
+fn notched_outline<S: Surface + ?Sized>(surface: &S, notch: f64, accuracy: f64) -> BezPath {
+    let notch = finite_or(notch, 0.0);
+    let length = centre_length(surface, 128);
+    let (w0, w1) = (half_width_at(surface, 0.0), half_width_at(surface, 1.0));
+    if notch <= 0.0 || length.is_nan() || length <= EPS || w0.min(w1) < 4.0 * accuracy {
+        return surface.outline(accuracy);
+    }
+    let du = |w: f64| (notch * w / length).clamp(0.0, 0.3);
+    let (Some(left), Some(right)) = (
+        fit_clean(&*surface.iso_v(1.0), 0.0, accuracy),
+        fit_clean(
+            &FnCurve(|t: f64| surface.point(1.0 - t, -1.0)),
+            0.0,
+            accuracy,
+        ),
+    ) else {
+        return surface.outline(accuracy);
+    };
+    let mut path = left;
+    path.line_to(surface.point(1.0 - du(w1), 0.0));
+    path.line_to(surface.point(1.0, -1.0));
+    let mut out = join_closed(&path, &right);
+    // `join_closed` closes back to the start's left corner: insert the start notch first.
+    out.pop();
+    out.line_to(surface.point(du(w0), 0.0));
+    out.close_path();
+    out
+}
+
+/// Approximate length of a surface's centre line from `n` chords.
+fn centre_length<S: Surface + ?Sized>(surface: &S, n: usize) -> f64 {
+    let pts: Vec<Point> = (0..=n)
+        .map(|i| surface.point(i as f64 / n as f64, 0.0))
+        .collect();
+    pts.windows(2).map(|w| (w[1] - w[0]).hypot()).sum()
+}
+
+/// The engraved layers of any surface (a [`Ribbon`], a leaf, a sub-band), bottom to top:
+/// the mid-tone fill; then, clipped by the outline, a dark tonal band along each edge
+/// (wider on the shaded side), a two-step light core on the lit side, hatch lines running
+/// along the surface on the shaded side, thin contour lines and an ink rim; then a hairline
+/// outline. The convex side of every bend is lit (see [`RibbonParams::lit_side`]).
+///
+/// Every band and line lives in the surface's `(u, v)` space with a thickness proportional
+/// to the local half-width, so it tapers into tips and spiral eyes instead of piling up,
+/// and the visible outline thins where the ribbon does. Only the ornament fields of
+/// `params` are used; the hairline width is the style's fraction of the widest half-width.
 pub fn ribbon_layers<S: Surface + ?Sized>(
     seed: &SeedTree,
     surface: &S,
@@ -167,91 +289,112 @@ pub fn ribbon_layers<S: Surface + ?Sized>(
     if !(wmax.is_finite() && wmax > EPS) {
         return root;
     }
-    let outline = clean(&surface.outline(acc), acc);
+    let outline = clean(&notched_outline(surface, params.notch, acc), acc);
     if outline.elements().len() < 3 {
         return root;
     }
-    let lit = if params.lit_side < 0.0 { -1.0 } else { 1.0 };
-    let width = |k: f64| finite_or(k, 0.0).max(0.0) * wmax;
+    let frac = |k: f64| finite_or(k, 0.0).max(0.0);
     root.push(Node::path(outline.clone(), Style::fill(style.fill)));
 
+    let tone = Tone::new(surface, params.lit_side, wmax);
     let mut details = Node::empty();
+    let strip =
+        |lo: &dyn Fn(f64) -> f64, hi: &dyn Fn(f64) -> f64| band(surface, 0.0, 1.0, lo, hi, acc);
+
+    // Dark edge bands, a third wider on the shaded side.
+    let edge = finite_or(params.edge_band, 0.0).clamp(0.0, 0.6);
+    let edge_at = |u: f64, side: f64| edge * (1.0 + 0.35 * (2.0 * tone.shadow(u, side) - 1.0));
+    if edge > 0.0 {
+        let bands = vec![
+            strip(&|u| 1.0 - edge_at(u, 1.0), &|_| 1.0),
+            strip(&|_| -1.0, &|u| edge_at(u, -1.0) - 1.0),
+        ];
+        push_merged(&mut details, bands, Style::fill(style.shade), acc);
+    }
+
+    // Light core: a soft band and a brighter centre, shifted towards the lit side.
     if params.highlight {
-        // A soft outer band and a brighter core read as a rounded, satin surface.
-        for (a, b, alpha) in [(0.18, 0.8, 0.5), (0.32, 0.68, 0.9)] {
-            let band = Band {
-                surface,
-                v0: lit * a,
-                v1: lit * b,
-            };
-            let path = clean(&band.outline(acc), acc);
-            if path.elements().len() >= 3 {
-                details.push(Node::path(
-                    path,
-                    Style::fill(style.highlight).with_opacity(alpha),
-                ));
-            }
+        let c = |u: f64| 0.28 * tone.lit(u);
+        for (h, alpha) in [(0.32, 0.6), (0.13, 1.0)] {
+            let p = strip(&|u| c(u) - h, &|u| c(u) + h);
+            push_merged(
+                &mut details,
+                vec![p],
+                Style::fill(style.highlight).with_opacity(alpha),
+                acc,
+            );
         }
     }
-    if params.hatch && width(style.hatch_width) > 0.0 {
-        let opts = HatchOptions {
-            spacing: 0.26 * wmax,
-            angle: 62.0,
-            min_len: 0.12 * wmax,
-            jitter: 0.25,
-            taper: 0.1,
-            shade: Shade::Edge {
-                side: -lit,
-                width: 0.55,
-            },
-        };
-        let lines = hatch(surface, &opts, seed, acc);
-        push_merged(
-            &mut details,
-            lines,
-            Style::stroke(style.stripe, width(style.hatch_width)).with_opacity(0.85),
-            acc,
-        );
+
+    // Hatching: lines along the surface, from the shaded edge inwards; each reaches only
+    // where the shadow is deep enough for it, the inner ones less far, and inner lines
+    // drop out where the ribbon narrows. Line ends taper to points.
+    let hatch_t = frac(style.hatch_width);
+    if params.hatch && hatch_t > 0.0 {
+        let mut rng = seed.rng_for("hatch");
+        let count = 6;
+        let step = 0.085;
+        let mut lines = Vec::new();
+        for side in [1.0, -1.0] {
+            for k in 0..count {
+                let v = move |u: f64| side * (0.96 - edge_at(u, side) - step * k as f64);
+                let thr = 0.42 + 0.06 * k as f64 + rng.uniform(-0.05, 0.05);
+                let need = 0.1 + 0.05 * k as f64;
+                let half = |u: f64| {
+                    let s = smoothstep((tone.shadow(u, side) - thr) / 0.12);
+                    let w = smoothstep((tone.rel(u) - need) / 0.08);
+                    0.5 * hatch_t * s * w
+                };
+                lines.extend(line_strips(surface, v, half, acc));
+            }
+        }
+        let ink = style.stripe.mix(style.shade, 0.35);
+        push_merged(&mut details, lines, Style::fill(ink), acc);
     }
-    if (params.stripes > 0 || params.centre_stripe) && width(style.stripe_width) > 0.0 {
-        let lines = nested(
-            surface,
-            params.stripes,
-            finite_or(params.stripe_inset, 0.18),
-            params.centre_stripe,
-            acc,
-        );
-        push_merged(
-            &mut details,
-            lines,
-            Style::stroke(style.stripe, width(style.stripe_width)),
-            acc,
-        );
+
+    // Contour lines: the inner border of each edge band, then `stripes − 1` more inwards.
+    let stripe_t = frac(style.stripe_width);
+    if stripe_t > 0.0 {
+        let mut lines = Vec::new();
+        let gap = finite_or(params.stripe_inset, 0.14).clamp(0.04, 0.4);
+        for side in [1.0, -1.0] {
+            for k in 0..params.stripes.min(8) {
+                let need = 0.12 * k as f64;
+                let v = |u: f64| {
+                    let e = if edge > 0.0 { edge_at(u, side) } else { gap };
+                    side * (1.0 - e - gap * k as f64)
+                };
+                let half = |u: f64| 0.5 * stripe_t * smoothstep((tone.rel(u) - need) / 0.08);
+                lines.extend(line_strips(surface, v, half, acc));
+            }
+        }
+        if params.centre_stripe {
+            lines.extend(line_strips(surface, |_| 0.0, |_| 0.5 * stripe_t, acc));
+        }
+        push_merged(&mut details, lines, Style::fill(style.stripe), acc);
     }
+
+    // Ink rim: the visible outline, as thick as a fixed fraction of the local width.
+    let hair = frac(style.outline_width);
+    if hair > 0.0 {
+        let r = 2.2 * hair;
+        let rims = vec![
+            strip(&|_| 1.0 - r, &|_| 1.0),
+            strip(&|_| -1.0, &|_| r - 1.0),
+        ];
+        push_merged(&mut details, rims, Style::fill(style.ink), acc);
+    }
+
     if details.path_count() > 0 {
         root.push(details.clipped(outline.clone()));
     }
-    if width(style.outline_width) > 0.0 {
+    if hair > 0.0 {
         root.push(Node::path(
             outline,
-            Style::stroke(style.ink, width(style.outline_width)),
+            Style::stroke(style.ink, hair * wmax).with_cap(LineCap::Round),
         ));
     }
     root
-}
-
-/// The strip `v ∈ [v0, v1]` of a surface, re-parameterised to `v ∈ [-1, 1]`.
-struct Band<'a, S: ?Sized> {
-    surface: &'a S,
-    v0: f64,
-    v1: f64,
-}
-
-impl<S: Surface + ?Sized> Surface for Band<'_, S> {
-    fn point(&self, u: f64, v: f64) -> Point {
-        self.surface
-            .point(u, lerp(self.v0, self.v1, 0.5 * (v.clamp(-1.0, 1.0) + 1.0)))
-    }
 }
 
 /// Largest half-width of a surface over 257 samples (non-finite samples ignored).
@@ -492,6 +635,22 @@ impl Sheet {
         ribbon_layers(seed, &leaf, params, style, self.acc)
     }
 
+    /// Fit, record and draw a leaf in the engraved foliage style (two-tone blade, hatching,
+    /// a vein per lobe, ink outline).
+    pub(crate) fn foliage<C: Curve>(
+        &mut self,
+        label: &str,
+        seed: &SeedTree,
+        mut leaf: Leaf<C>,
+        style: &LeafStyle,
+    ) -> Node {
+        leaf.fit_width(self.acc);
+        if let Some(r) = &mut self.reports {
+            r.push((label.to_string(), leaf.check(self.acc)));
+        }
+        leaf_motif(seed, &leaf, style, self.acc)
+    }
+
     #[cfg(test)]
     pub(crate) fn reports(&self) -> &[(String, RibbonReport)] {
         self.reports.as_deref().unwrap_or(&[])
@@ -584,7 +743,7 @@ fn s_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         bulge,
     );
     let profile = WidthProfile::swell(
-        l * rng.uniform(0.045, 0.062),
+        l * rng.uniform(0.07, 0.085),
         rng.uniform(0.4, 0.6),
         rng.uniform(1.0, 1.3),
         rng.uniform(1.0, 1.3),
@@ -607,7 +766,7 @@ fn whiplash_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let hook = rng.uniform(0.9, 1.35);
     let curve = whiplash(&mut rng, Point::ORIGIN, dir, 1.3 * l, hook);
     let body = WidthProfile::swell(
-        l * rng.uniform(0.032, 0.045),
+        l * rng.uniform(0.052, 0.064),
         rng.uniform(0.22, 0.34),
         1.4,
         0.9,
@@ -623,7 +782,8 @@ fn whiplash_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     maybe_mirror(node, &mut rng)
 }
 
-/// Wide wavy banner with open rounded ends, a border stripe and a bright highlight.
+/// Wide wavy banner swelling towards the middle like cloth, both ends cut into a
+/// swallowtail notch.
 fn banner(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let l = sh.size;
@@ -637,21 +797,23 @@ fn banner(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         wav,
         bulge,
     );
-    let profile = WidthProfile::constant(l * rng.uniform(0.07, 0.085))
-        .with_noise(seed.noise_seed("width"), 0.07, 2.0)
-        .map(|u, w| w * (0.9 + 0.15 * (PI * u).sin()));
+    let swell = rng.uniform(0.18, 0.28);
+    let profile = WidthProfile::constant(l * rng.uniform(0.072, 0.085))
+        .with_noise(seed.noise_seed("width"), 0.05, 2.0)
+        .map(move |u, w| w * (1.0 - swell + swell * (PI * u).sin()));
     let style = RibbonStyle::from_palette(palette, rng.chance(0.5), rng.uniform(0.3, 0.7));
     let params = RibbonParams {
-        stripes: 1,
-        stripe_inset: 0.14,
+        stripes: 2,
+        notch: rng.uniform(2.0, 2.6),
         lit_side: coin(&mut rng),
         ..RibbonParams::symmetric(profile)
     };
     sh.ribbon("banner", seed, curve, &params, &style).0
 }
 
-/// Two strands winding around a common axis; at each crossing the strand on top
-/// alternates and casts a soft shadow on the other one.
+/// Two strands winding around a common axis, bound together at both ends where they
+/// converge into one point; at each crossing the strand on top alternates and the one
+/// passing under it darkens in its shadow.
 fn twist(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let l = sh.size;
@@ -665,31 +827,30 @@ fn twist(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         wav,
         0.0,
     );
-    let crossings = if rng.chance(0.5) { 3 } else { 4 };
-    let m = crossings as f64;
+    let crossings: usize = if rng.chance(0.5) { 2 } else { 3 };
+    // The strands cross at `u = j/m`, `j = 1..m−1`, and meet at both ends `u = 0, 1`.
+    let m = (crossings + 1) as f64;
     let axis_len = axis.length();
     // Crossing angle of about 2·atan(amp·π·m / L) ≈ 85°.
     let amp = 0.29 * axis_len / m;
-    let w = l * rng.uniform(0.032, 0.04);
+    let w = l * rng.uniform(0.05, 0.058);
     let al = axis.arc_length(1024);
     let strand = |sign: f64| {
         let f = FnCurve(|u: f64| {
             let t = al.t_at_fraction(u);
-            axis.point(t) + axis.normal(t) * (sign * amp * (PI * m * u).cos())
+            axis.point(t) + axis.normal(t) * (sign * amp * (PI * m * u).sin())
         });
         to_composite(&f, acc)
     };
-    // Widest where the strands cross (seen face-on), narrower where they turn.
+    // Widest where the strands cross (seen face-on), narrower where they turn, tapering
+    // into the shared points at the ends.
     let profile = WidthProfile::custom(move |u| {
-        w * (0.55 + 0.45 * (PI * m * u).sin().abs())
-            * ease(u / 0.08, 0.8)
-            * ease((1.0 - u) / 0.08, 0.8)
+        w * (0.6 + 0.4 * (PI * m * u).cos().abs())
+            * ease(u / 0.12, 0.8)
+            * ease((1.0 - u) / 0.12, 0.8)
     });
     let params = RibbonParams {
         stripes: 1,
-        stripe_inset: 0.2,
-        centre_stripe: true,
-        hatch: false,
         ..RibbonParams::symmetric(profile)
     };
     let t = rng.uniform(0.2, 0.5);
@@ -697,29 +858,43 @@ fn twist(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let style_b = RibbonStyle::from_palette(palette, false, t);
     let (node_a, rib_a) = sh.ribbon("twist-a", &seed.child("a"), strand(1.0), &params, &style_a);
     let (node_b, rib_b) = sh.ribbon("twist-b", &seed.child("b"), strand(-1.0), &params, &style_b);
-    let out_a = clean(&rib_a.outline(acc), acc);
-    let out_b = clean(&rib_b.outline(acc), acc);
-    let shade = Vec2::new(0.35, 0.45) * w;
     let radius = 0.47 * axis_len / m;
-    let region = |j: usize| {
-        let c = axis.point(al.t_at_fraction((j as f64 + 0.5) / m));
-        Circle::new(c, radius).to_path(acc)
-    };
-    let shadow = |top: &BezPath, bottom: &BezPath, j: usize| {
-        let mut p = top.clone();
-        p.apply_affine(Affine::translate(shade));
-        Node::path(p, Style::fill(palette.ink).with_opacity(0.4))
-            .clipped(bottom.clone())
-            .clipped(region(j))
+    let centre = |j: usize| axis.point(al.t_at_fraction((j + 1) as f64 / m));
+
+    let region = |j: usize| Circle::new(centre(j), radius).to_path(acc);
+    // Shadow on the strand passing under at crossing `j`: nested full-width bands
+    // centred on the crossing, darkest next to the strand on top.
+    let shadow = |under: &Ribbon<Composite>, style: &RibbonStyle, j: usize| {
+        let c = centre(j);
+        let u = (0..=512)
+            .map(|i| i as f64 / 512.0)
+            .min_by(|a, b| {
+                let da = (under.point(*a, 0.0) - c).hypot();
+                let db = (under.point(*b, 0.0) - c).hypot();
+                da.total_cmp(&db)
+            })
+            .unwrap_or(0.5);
+        let len = under.length().max(EPS);
+        let mut g = Node::empty();
+        for (k, alpha) in [(2.6, 0.12), (2.0, 0.14), (1.5, 0.16), (1.1, 0.2)] {
+            let du = k * w / len;
+            let p = clean(&band(under, u - du, u + du, |_| -1.0, |_| 1.0, acc), acc);
+            if p.elements().len() >= 3 {
+                let dark = style.shade.mix(style.ink, 0.5);
+                g.push(Node::path(p, Style::fill(dark).with_opacity(1.6 * alpha)));
+            }
+        }
+        g
     };
     let mut root = Node::empty();
     root.push(node_b.clone());
     for j in (0..crossings).step_by(2) {
-        root.push(shadow(&out_a, &out_b, j));
+        root.push(shadow(&rib_b, &style_b, j));
     }
     root.push(node_a);
     for j in (1..crossings).step_by(2) {
-        root.push(shadow(&out_b, &out_a, j));
+        root.push(shadow(&rib_a, &style_a, j));
+
         root.push(node_b.clone().clipped(region(j)));
     }
     root
@@ -737,7 +912,7 @@ fn scroll(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let cw = body.curvature(1.0) < 0.0;
     let curve = spiral_tail(&body, turns, k, cw, sh.acc);
     let base = WidthProfile::tapered(
-        l * rng.uniform(0.05, 0.065),
+        l * rng.uniform(0.07, 0.082),
         rng.uniform(0.15, 0.25),
         0.05,
         1.1,
@@ -777,7 +952,7 @@ fn double_curl(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         sh.acc,
     );
     let ratio = coil_ratio(t1.min(t2), end_ratio);
-    let base = WidthProfile::tapered(l * rng.uniform(0.04, 0.055), 0.04, 0.04, 0.9);
+    let base = WidthProfile::tapered(l * rng.uniform(0.06, 0.07), 0.04, 0.04, 0.9);
     let profile = coiled(base, &curve, ratio);
     let style = RibbonStyle::from_palette(palette, rng.chance(0.5), rng.uniform(0.2, 0.6));
     let params = RibbonParams {
@@ -788,7 +963,9 @@ fn double_curl(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     sh.ribbon("double-curl", seed, curve, &params, &style).0
 }
 
-/// A C-shaped ribbon with a small acanthus leaf growing from its concave side.
+/// A C-shaped ribbon with a large acanthus leaf sprouting from its concave side: the
+/// leaf's base is tangent to the ribbon's edge, its midrib follows the bend, swings out
+/// and curls back towards the ribbon.
 fn leafed_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let l = sh.size;
@@ -806,7 +983,7 @@ fn leafed_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         b,
     );
     let profile = WidthProfile::swell(
-        l * rng.uniform(0.04, 0.055),
+        l * rng.uniform(0.058, 0.068),
         rng.uniform(0.4, 0.6),
         1.2,
         1.2,
@@ -819,10 +996,8 @@ fn leafed_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     };
     let (node, ribbon) = sh.ribbon("leafed-ribbon", seed, curve, &params, &style);
 
-    // The leaf sprouts where the ribbon bends most, from inside the ribbon (its base is
-    // hidden under it), leaning forward along the direction of travel.
-    let c = ribbon.centerline();
-    let (u, kappa) = (0..=40)
+    // The leaf grows along the bend, on the concave side (`side`).
+    let (u_bend, kappa) = (0..=40)
         .map(|i| {
             let u = lerp(0.35, 0.65, i as f64 / 40.0);
             (u, chord_curvature(&ribbon, u, 0.03))
@@ -831,29 +1006,32 @@ fn leafed_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
             if b.1.abs() > a.1.abs() { b } else { a }
         });
     let side = if kappa < 0.0 { -1.0 } else { 1.0 };
-    let t = ribbon.t_at(u);
-    let lean = rng.uniform(0.35, 0.6);
-    let dir = c.normal(t) * (side * lean.cos()) + c.tangent(t) * lean.sin();
+    let span = rng.uniform(0.38, 0.45);
+    let u0 = (u_bend - rng.uniform(0.35, 0.5) * span).clamp(0.06, 0.94 - span);
+    let len = span * ribbon.length();
     let rho = 1.0 / kappa.abs().max(EPS);
-    let len = (0.9 * rho).min(0.3 * ribbon.length());
-    let lobes = if rng.chance(0.5) { 4 } else { 5 };
-    let leaf = Leaf::from_base(
-        ribbon.point(u, 0.5 * side),
-        dir,
-        len,
-        len * rng.uniform(0.5, 0.62),
+    let hw0 = ribbon.half_width(u0);
+    let swing = (rng.uniform(0.3, 0.36) * len).min(0.7 * (rho - hw0).max(0.0));
+    let c = ribbon.centerline();
+    // Midrib: the concave edge, pushed out smoothly by up to `swing` (tangent to the edge
+    // at the base, parallel to it again at the tip, where the tip curl turns it back).
+    let midrib = FnCurve(|s: f64| {
+        let u = u0 + span * s;
+        let out = c.normal(ribbon.t_at(u)) * side;
+        let off = -0.4 * hw0 * (1.0 - s).powi(2) + swing * smoothstep(s);
+        ribbon.point(u, side) + out * off
+    });
+    let midrib = to_composite(&midrib, sh.acc);
+    let lobes = if rng.chance(0.5) { 3 } else { 4 };
+    let leaf = Leaf::new(
+        midrib,
         LeafParams::new(LeafShape::Acanthus { lobes })
-            .with_tip_curl(-side * rng.uniform(0.2, 0.45))
-            .with_asymmetry(rng.uniform(-0.2, 0.2)),
+            .with_aspect(rng.uniform(0.5, 0.58))
+            .with_tip_curl(-side * rng.uniform(0.55, 0.8))
+            .with_asymmetry(side * rng.uniform(0.25, 0.4)),
     );
-    let leaf_style = RibbonStyle::from_palette(palette, !warm, rng.uniform(0.25, 0.5));
-    let leaf_node = sh.leaf(
-        "leafed-ribbon-leaf",
-        &seed.child("leaf"),
-        leaf,
-        &leaf_params(side),
-        &leaf_style,
-    );
+    let leaf_style = LeafStyle::from_palette(palette, !warm, rng.uniform(0.25, 0.5));
+    let leaf_node = sh.foliage("leafed-ribbon-leaf", &seed.child("leaf"), leaf, &leaf_style);
     Node::group(vec![leaf_node, node])
 }
 
@@ -887,6 +1065,12 @@ pub(crate) mod tests {
                 "{name}: degenerate segment"
             );
         });
+        // render cost: tonal bands and lines are merged into a few paths per layer
+        assert!(
+            node.path_count() < 1500,
+            "{name}: {} paths",
+            node.path_count()
+        );
         let bb = node.bounding_box().expect("geometry");
         let h = 0.5 * size * (1.0 + 1e-9);
         assert!(

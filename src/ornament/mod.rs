@@ -10,7 +10,7 @@ pub mod engrave;
 pub mod hatch;
 pub mod stipple;
 
-pub use contour::{nested, spaced_stripes, stripes, trimmed_stripes};
+pub use contour::{band, line_strips, nested, spaced_stripes, stripes, trimmed_stripes};
 pub use engrave::{EngraveOptions, engrave};
 pub use hatch::{HatchOptions, Shade, cross_hatch, hatch};
 pub use stipple::{stipple, stipple_path};

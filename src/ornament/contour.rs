@@ -3,7 +3,8 @@
 //! instead of piling up on top of each other.
 
 use super::{PROFILE_SAMPLES, fit_clean, golden, half_width_at, max_half_width, runs};
-use crate::geom::{CurveExt, EPS, Surface};
+use crate::geom::surface::join_closed;
+use crate::geom::{CurveExt, EPS, FnCurve, Surface, lerp};
 use kurbo::{BezPath, Point};
 
 /// Most stripes a single call produces per side, so absurd spacings stay bounded.
@@ -170,6 +171,66 @@ pub fn spaced_stripes<S: Surface + ?Sized>(
     trimmed_stripes(surface, &vs, 0.5 * spacing, accuracy)
 }
 
+/// Closed outline of the strip of `surface` between the curves `v = lo(u)` and `v = hi(u)`
+/// for `u ∈ [a, b]`: the `hi` side forward, then the `lo` side backward.
+///
+/// Both sides share the surface's own parameterisation, so the strip bends, narrows and
+/// tapers with the shape: a tonal band, or a line whose thickness follows the local width.
+/// Where `lo(u) = hi(u)` at an end the strip ends in a point. `v` values are clamped to
+/// `[-1, 1]` by the surface. Empty if either side is non-finite or degenerate.
+pub fn band<S: Surface + ?Sized>(
+    surface: &S,
+    a: f64,
+    b: f64,
+    lo: impl Fn(f64) -> f64,
+    hi: impl Fn(f64) -> f64,
+    accuracy: f64,
+) -> BezPath {
+    if !(a.is_finite() && b.is_finite()) || (b - a).abs() < 1e-9 {
+        return BezPath::new();
+    }
+    let at = |t: f64| lerp(a, b, t.clamp(0.0, 1.0));
+    let upper = FnCurve(|t: f64| surface.point(at(t), hi(at(t))));
+    let lower = FnCurve(|t: f64| surface.point(at(1.0 - t), lo(at(1.0 - t))));
+    match (
+        fit_clean(&upper, 0.0, accuracy),
+        fit_clean(&lower, 0.0, accuracy),
+    ) {
+        (Some(p), Some(q)) => join_closed(&p, &q),
+        _ => BezPath::new(),
+    }
+}
+
+/// Thin strips around the curve `v = centre(u)`, `half(u)` wide on each side (in `v`
+/// units, so the canvas thickness follows the local half-width), one strip per maximal
+/// `u`-interval where `half(u)` exceeds `1e-4`. Letting `half` fall to zero makes a line
+/// end in a point: engraved lines drawn this way never pile up where the shape narrows.
+pub fn line_strips<S: Surface + ?Sized>(
+    surface: &S,
+    centre: impl Fn(f64) -> f64,
+    half: impl Fn(f64) -> f64,
+    accuracy: f64,
+) -> Vec<BezPath> {
+    let h = |u: f64| {
+        let x = half(u);
+        if x.is_finite() { x.max(0.0) } else { 0.0 }
+    };
+    runs(|u| h(u) > 1e-4, PROFILE_SAMPLES)
+        .into_iter()
+        .map(|(a, b)| {
+            band(
+                surface,
+                a,
+                b,
+                |u| centre(u) - h(u),
+                |u| centre(u) + h(u),
+                accuracy,
+            )
+        })
+        .filter(|p| p.elements().len() >= 3)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +329,30 @@ mod tests {
                 "gap {g} vs {expected}"
             );
         }
+    }
+
+    #[test]
+    fn bands_are_closed_and_inside() {
+        let s = petal();
+        let outline = s.outline(0.02);
+        let p = band(&s, 0.1, 0.9, |_| 0.2, |u| 0.2 + 0.6 * u, 0.05);
+        assert!(matches!(
+            p.elements().last(),
+            Some(kurbo::PathEl::ClosePath)
+        ));
+        assert_clean(std::slice::from_ref(&p));
+        assert!(inside_fraction(&outline, &path_samples(&[p])) >= 0.99);
+        assert!(
+            band(&s, 0.5, 0.5, |_| 0.0, |_| 1.0, 0.05)
+                .elements()
+                .is_empty()
+        );
+        let _ = band(&Needle, 0.0, 1.0, |_| -1.0, |_| 1.0, 0.05);
+        // a line that fades out in the middle splits into two pointed strips
+        let lines = line_strips(&s, |_| 0.5, |u| 0.03 * (2.0 * u - 1.0).abs() - 0.01, 0.05);
+        assert_eq!(lines.len(), 2);
+        assert_clean(&lines);
+        assert!(line_strips(&s, |_| 0.5, |_| f64::NAN, 0.05).is_empty());
     }
 
     #[test]
