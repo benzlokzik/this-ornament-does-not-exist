@@ -3,8 +3,11 @@
 //! The exporter writes a compact, byte-deterministic document: numbers are formatted with
 //! three fixed decimals (trailing zeros trimmed, `-0` normalised to `0`), attributes are
 //! emitted in sorted order by the `svg` crate, and attributes equal to their SVG defaults
-//! are omitted. Clip paths live in a single `<defs>` block at the top of the document with
-//! ids `clip0`, `clip1`, … assigned in document (pre-)order.
+//! are omitted. Path data is relative and compact (see [`path_data`]). Clip paths live in a
+//! single `<defs>` block at the top of the document with ids `clip0`, `clip1`, … assigned in
+//! document (pre-)order. Path data that occurs more than once (a leaf outline is filled,
+//! clipped to and stroked) is written once in `<defs>` as `<path id="p0">`, `p1`, … and
+//! referenced with `<use href>`, which renders identically.
 //!
 //! Non-finite geometry never reaches the output: a path with a NaN/∞ coordinate is skipped,
 //! a group with a non-finite transform is skipped with its subtree, and a non-finite clip is
@@ -13,10 +16,15 @@
 use crate::geom::validate;
 use crate::scene::{Color, LineCap, LineJoin, Node, Scene, Style};
 use kurbo::{Affine, BezPath, PathEl, Point};
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use svg::Node as _;
-use svg::node::element::{ClipPath, Definitions, Group, Path as SvgPath, Rectangle};
+use svg::node::element::{ClipPath, Definitions, Element, Group, Path as SvgPath, Rectangle};
+
+/// Path data at least this long (bytes) is shared through `<defs>` when it repeats; shorter
+/// data costs less inline than a `<use>` reference.
+const MIN_SHARED: usize = 32;
 
 /// Build the SVG document for `scene`, including its background rectangle.
 pub fn to_svg_document(scene: &Scene) -> svg::Document {
@@ -43,13 +51,23 @@ pub(crate) fn build_document(scene: &Scene, with_background: bool) -> svg::Docum
         .set("height", h.as_str())
         .set("viewBox", format!("0 0 {w} {h}"));
 
-    let mut clips = Vec::new();
+    let mut counts = HashMap::new();
+    count_path_data(&scene.root, &mut counts);
+    let mut em = Emitter {
+        clips: Vec::new(),
+        shared: Vec::new(),
+        ids: HashMap::new(),
+        counts,
+    };
     let mut body = Vec::new();
-    emit_node(&scene.root, &mut clips, &mut body);
+    emit_node(&scene.root, &mut em, &mut body);
 
-    if !clips.is_empty() {
+    if !em.clips.is_empty() || !em.shared.is_empty() {
         let mut defs = Definitions::new();
-        for c in clips {
+        for p in em.shared {
+            defs.append(p);
+        }
+        for c in em.clips {
             defs.append(c);
         }
         doc.append(defs);
@@ -71,15 +89,95 @@ pub(crate) fn build_document(scene: &Scene, with_background: bool) -> svg::Docum
     doc
 }
 
-/// Append the SVG elements for `node` to `out`, registering clip paths in `clips`.
+/// Document-wide state of the exporter.
+struct Emitter {
+    clips: Vec<ClipPath>,
+    /// Shared path data, `<path id="pN" d="…"/>` in id order.
+    shared: Vec<SvgPath>,
+    /// Id number of each shared path data string.
+    ids: HashMap<String, usize>,
+    /// How often each path data string occurs in the document.
+    counts: HashMap<String, usize>,
+}
+
+impl Emitter {
+    /// A `<path>` with data `d`, or a `<use>` of the shared copy when `d` repeats.
+    fn shape(&mut self, d: String) -> Element {
+        if d.len() < MIN_SHARED || self.counts.get(&d).is_none_or(|&n| n < 2) {
+            let mut el = Element::new("path");
+            el.assign("d", d);
+            return el;
+        }
+        let next = self.ids.len();
+        let id = *self.ids.entry(d).or_insert_with_key(|d| {
+            self.shared.push(
+                SvgPath::new()
+                    .set("id", format!("p{next}"))
+                    .set("d", d.as_str()),
+            );
+            next
+        });
+        let mut el = Element::new("use");
+        el.assign("href", format!("#p{id}"));
+        el
+    }
+}
+
+/// Count the path data strings of every path and clip that [`emit_node`] may write.
+fn count_path_data(node: &Node, counts: &mut HashMap<String, usize>) {
+    let mut add = |path: &BezPath| {
+        if let Some(d) = path_data(path) {
+            *counts.entry(d).or_insert(0) += 1;
+        }
+    };
+    match node {
+        Node::Path { path, style } => {
+            if visible(style) {
+                add(path);
+            }
+        }
+        Node::Group {
+            transform,
+            clip,
+            children,
+            ..
+        } => {
+            if !transform.as_coeffs().iter().all(|c| c.is_finite()) {
+                return;
+            }
+            if let Some(c) = clip {
+                add(&clip_path(&c.path));
+            }
+            for c in children {
+                count_path_data(c, counts);
+            }
+        }
+    }
+}
+
+/// A clip path with its non-finite elements dropped.
+fn clip_path(path: &BezPath) -> BezPath {
+    if validate::path_is_finite(path) {
+        path.clone()
+    } else {
+        validate::sanitize(path, 0.0)
+    }
+}
+
+/// Append the SVG elements for `node` to `out`, registering clip paths and shared path data
+/// in `em`.
 ///
 /// A group with nothing to say (no id, identity transform, no clip, opacity 1) is inlined:
 /// its children go straight into `out`, which keeps the document flat and small.
-fn emit_node(node: &Node, clips: &mut Vec<ClipPath>, out: &mut Vec<Box<dyn svg::Node>>) {
+fn emit_node(node: &Node, em: &mut Emitter, out: &mut Vec<Box<dyn svg::Node>>) {
     match node {
         Node::Path { path, style } => {
-            if let Some(p) = path_element(path, style) {
-                out.push(Box::new(p));
+            if visible(style)
+                && let Some(d) = path_data(path)
+            {
+                let mut el = em.shape(d);
+                apply_style(&mut el, style);
+                out.push(Box::new(el));
             }
         }
         Node::Group {
@@ -99,23 +197,18 @@ fn emit_node(node: &Node, clips: &mut Vec<ClipPath>, out: &mut Vec<Box<dyn svg::
 
             // Register the clip before visiting children so ids follow document order.
             let clip_ref = clip.as_ref().map(|c| {
-                let n = clips.len();
+                let n = em.clips.len();
                 let mut cp = ClipPath::new().set("id", format!("clip{n}"));
-                let path = if validate::path_is_finite(&c.path) {
-                    c.path.clone()
-                } else {
-                    validate::sanitize(&c.path, 0.0)
-                };
-                if let Some(d) = path_data(&path) {
-                    cp.append(SvgPath::new().set("d", d));
+                if let Some(d) = path_data(&clip_path(&c.path)) {
+                    cp.append(em.shape(d));
                 }
-                clips.push(cp);
+                em.clips.push(cp);
                 format!("url(#clip{n})")
             });
 
             let mut kids = Vec::new();
             for c in children {
-                emit_node(c, clips, &mut kids);
+                emit_node(c, em, &mut kids);
             }
 
             if id.is_none() && !has_transform && clip_ref.is_none() && opacity == 1.0 {
@@ -158,24 +251,38 @@ fn emit_node(node: &Node, clips: &mut Vec<ClipPath>, out: &mut Vec<Box<dyn svg::
 }
 
 /// The `<path>` element for one styled path, or `None` if it would be invalid or invisible.
+#[cfg(test)]
 fn path_element(path: &BezPath, style: &Style) -> Option<SvgPath> {
-    if !validate::path_is_finite(path) {
-        return None;
-    }
-    let opacity = unit(style.opacity);
-    let stroke = style
-        .stroke
-        .filter(|_| style.stroke_width.is_finite() && style.stroke_width > 0.0);
-    if opacity == 0.0 || (style.fill.is_none() && stroke.is_none()) {
+    if !visible(style) {
         return None;
     }
     let mut el = SvgPath::new().set("d", path_data(path)?);
+    apply_style(&mut el, style);
+    Some(el)
+}
+
+/// The visible stroke colour of `style`: none when the width is zero or not finite.
+fn stroke_of(style: &Style) -> Option<Color> {
+    style
+        .stroke
+        .filter(|_| style.stroke_width.is_finite() && style.stroke_width > 0.0)
+}
+
+/// `false` if a path in `style` would paint nothing.
+fn visible(style: &Style) -> bool {
+    unit(style.opacity) > 0.0 && (style.fill.is_some() || stroke_of(style).is_some())
+}
+
+/// Set the fill, stroke and opacity attributes of `style` on `el`, omitting SVG defaults.
+fn apply_style(el: &mut impl svg::Node, style: &Style) {
+    let opacity = unit(style.opacity);
+    let stroke = stroke_of(style);
     match style.fill {
-        Some(c) => paint(&mut el, "fill", c),
+        Some(c) => paint(el, "fill", c),
         None => el.assign("fill", "none"),
     }
     if let Some(c) = stroke {
-        paint(&mut el, "stroke", c);
+        paint(el, "stroke", c);
         if style.stroke_width != 1.0 {
             el.assign("stroke-width", fmt_num(style.stroke_width));
         }
@@ -194,11 +301,10 @@ fn path_element(path: &BezPath, style: &Style) -> Option<SvgPath> {
     if opacity < 1.0 {
         el.assign("opacity", fmt_num(opacity));
     }
-    Some(el)
 }
 
 /// Set `attr` (fill/stroke) to the colour, plus `attr-opacity` when alpha is below 1.
-fn paint(el: &mut SvgPath, attr: &str, c: Color) {
+fn paint(el: &mut impl svg::Node, attr: &str, c: Color) {
     el.assign(attr, c.to_hex());
     let a = unit(c.a);
     if a < 1.0 {
@@ -211,8 +317,14 @@ fn unit(x: f64) -> f64 {
     if x.is_nan() { 1.0 } else { x.clamp(0.0, 1.0) }
 }
 
-/// Compact absolute path data (`M L Q C Z`). Returns `None` for an empty path, a path with a
-/// non-finite coordinate, or one that draws before its first `MoveTo`.
+/// Compact path data. Returns `None` for an empty path, a path with a non-finite
+/// coordinate, or one that draws before its first `MoveTo`.
+///
+/// Coordinates are rounded to thousandths once, as absolute values; every command after the
+/// first `M` is then written relative to the rounded current point (`m l h v q c z`), so the
+/// offsets are exact and rounding never accumulates along a path. A command repeating the
+/// previous one omits its letter, and numbers drop leading zeros (`.5`) and separators that
+/// a sign or a second decimal point already imply.
 fn path_data(path: &BezPath) -> Option<String> {
     if !validate::path_is_finite(path) {
         return None;
@@ -221,37 +333,129 @@ fn path_data(path: &BezPath) -> Option<String> {
     if !matches!(els.first(), Some(PathEl::MoveTo(_))) {
         return None;
     }
-    let mut d = String::with_capacity(els.len() * 24);
-    for el in els {
+    let mut w = PathWriter {
+        d: String::with_capacity(els.len() * 16),
+        last_cmd: None,
+        last_dot: None,
+    };
+    let (mut cur, mut start) = ((0, 0), (0, 0));
+    for (i, el) in els.iter().enumerate() {
         match *el {
-            PathEl::MoveTo(p) => cmd(&mut d, 'M', &[p]),
-            PathEl::LineTo(p) => cmd(&mut d, 'L', &[p]),
-            PathEl::QuadTo(a, p) => cmd(&mut d, 'Q', &[a, p]),
-            PathEl::CurveTo(a, b, p) => cmd(&mut d, 'C', &[a, b, p]),
-            PathEl::ClosePath => d.push('Z'),
+            PathEl::MoveTo(p) => {
+                let p = milli(p);
+                if i == 0 {
+                    w.cmd('M', &[p]);
+                } else {
+                    w.cmd('m', &[delta(p, cur)]);
+                }
+                (cur, start) = (p, p);
+            }
+            PathEl::LineTo(p) => {
+                let p = milli(p);
+                match delta(p, cur) {
+                    (dx, 0) => w.cmd1('h', dx),
+                    (0, dy) => w.cmd1('v', dy),
+                    dp => w.cmd('l', &[dp]),
+                }
+                cur = p;
+            }
+            PathEl::QuadTo(a, p) => {
+                let (a, p) = (milli(a), milli(p));
+                w.cmd('q', &[delta(a, cur), delta(p, cur)]);
+                cur = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                let (a, b, p) = (milli(a), milli(b), milli(p));
+                w.cmd('c', &[delta(a, cur), delta(b, cur), delta(p, cur)]);
+                cur = p;
+            }
+            PathEl::ClosePath => {
+                w.d.push('z');
+                w.last_cmd = Some('z');
+                w.last_dot = None;
+                cur = start;
+            }
         }
     }
-    Some(d)
+    Some(w.d)
 }
 
-/// Append a command letter and its points. Numbers are separated by a space, except before
-/// a minus sign, which already delimits the number (`M10-20` is valid SVG).
-fn cmd(d: &mut String, c: char, pts: &[Point]) {
-    d.push(c);
-    let mut first = true;
-    for p in pts {
-        for v in [p.x, p.y] {
-            debug_assert!(
-                v.is_finite(),
-                "non-finite coordinate reached the SVG formatter"
-            );
-            let s = fmt_num(v);
-            if !first && !s.starts_with('-') {
-                d.push(' ');
-            }
-            d.push_str(&s);
-            first = false;
+/// A point rounded to integer thousandths of a unit.
+fn milli(p: Point) -> (i64, i64) {
+    debug_assert!(
+        p.is_finite(),
+        "non-finite coordinate reached the SVG formatter"
+    );
+    ((p.x * 1000.0).round() as i64, (p.y * 1000.0).round() as i64)
+}
+
+fn delta(p: (i64, i64), from: (i64, i64)) -> (i64, i64) {
+    (p.0 - from.0, p.1 - from.1)
+}
+
+/// Appends commands and numbers to path data with the fewest separators.
+struct PathWriter {
+    d: String,
+    /// The last command letter written.
+    last_cmd: Option<char>,
+    /// Whether the last token was a number containing a decimal point (`None` after a
+    /// command letter).
+    last_dot: Option<bool>,
+}
+
+impl PathWriter {
+    /// Write command `c` (its letter omitted when it repeats an implicit-repeatable command)
+    /// with the coordinate pairs `pts` in thousandths.
+    fn cmd(&mut self, c: char, pts: &[(i64, i64)]) {
+        self.letter(c);
+        for &(x, y) in pts {
+            self.num(x);
+            self.num(y);
         }
+    }
+
+    /// Write a one-number command (`h`, `v`).
+    fn cmd1(&mut self, c: char, v: i64) {
+        self.letter(c);
+        self.num(v);
+    }
+
+    fn letter(&mut self, c: char) {
+        // `M`/`m` cannot repeat implicitly (extra pairs would mean line-to).
+        if self.last_cmd != Some(c) || matches!(c, 'M' | 'm') {
+            self.d.push(c);
+            self.last_dot = None;
+        }
+        self.last_cmd = Some(c);
+    }
+
+    /// Write `v / 1000` with up to 3 decimals, no trailing zeros and no leading `0` before
+    /// the point, preceded by a space only where the grammar needs one.
+    fn num(&mut self, v: i64) {
+        let neg = v < 0;
+        let a = v.unsigned_abs();
+        let (int, frac) = (a / 1000, a % 1000);
+        let mut s = String::with_capacity(8);
+        if neg {
+            s.push('-');
+        }
+        if int > 0 || frac == 0 {
+            let _ = write!(s, "{int}");
+        }
+        if frac > 0 {
+            let f = format!("{frac:03}");
+            s.push('.');
+            s.push_str(f.trim_end_matches('0'));
+        }
+        let dot = frac > 0;
+        // A sign always starts a new number; a leading point does too after a number that
+        // already has one (`1.5.5` is 1.5 then .5).
+        let joins = neg || (s.starts_with('.') && self.last_dot == Some(true));
+        if self.last_dot.is_some() && !joins {
+            self.d.push(' ');
+        }
+        self.d.push_str(&s);
+        self.last_dot = Some(dot);
     }
 }
 
@@ -293,7 +497,7 @@ fn fmt_dec(x: f64, prec: usize) -> String {
 
 /// Make a user-supplied id a valid XML name: keep `[A-Za-z0-9_.:-]`, replace anything else
 /// with `_`, and prefix `_` if it does not start with a letter or underscore or if it looks
-/// like a generated clip id (`clipN`), which it would otherwise shadow.
+/// like a generated id (`clipN`, `pN`), which it would otherwise shadow.
 fn sanitize_id(id: &str) -> Option<String> {
     if id.is_empty() {
         return None;
@@ -308,9 +512,10 @@ fn sanitize_id(id: &str) -> Option<String> {
             }
         })
         .collect();
-    let generated = s
-        .strip_prefix("clip")
-        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    let generated = ["clip", "p"].iter().any(|prefix| {
+        s.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
     if generated || !s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
         s.insert(0, '_');
     }
@@ -351,8 +556,61 @@ mod tests {
         p.line_to((1.0, 0.0));
         assert_eq!(
             path_data(&p).unwrap(),
-            "M10-20L30.5 40Q1 2 3 4C-1-2 5 6 7 8ZM0 0L1 0"
+            "M10-20l20.5 60q-29.5-38-27.5-36c-4-6 2 2 4 4zm-10 20h1"
         );
+        // Leading zeros dropped, separators only where needed, repeated commands implicit.
+        let mut p = BezPath::new();
+        p.move_to((0.5, 0.25));
+        p.line_to((1.0, 0.75));
+        p.line_to((1.25, 0.5));
+        p.line_to((1.25, 2.0));
+        p.line_to((1.25, 3.0));
+        assert_eq!(path_data(&p).unwrap(), "M.5.25l.5.5.25-.25v1.5 1");
+    }
+
+    /// Path data survives a round trip through usvg: every point is the input rounded to
+    /// thousandths, with no drift along a long relative path.
+    #[test]
+    fn path_data_round_trips_through_usvg() {
+        use resvg::usvg;
+        let mut p = BezPath::new();
+        let mut expected = Vec::new();
+        let v = |i: usize| ((i * 7919) % 100_003) as f64 / 37.123 - 1300.0;
+        let mut pt = |i: usize| {
+            let q = Point::new(v(2 * i), v(2 * i + 1));
+            expected.push(q);
+            q
+        };
+        p.move_to(pt(0));
+        for i in 0..400 {
+            let k = 1 + 3 * i;
+            match i % 4 {
+                0 => p.line_to(pt(k)),
+                1 => p.quad_to(pt(k), pt(k + 1)),
+                2 => p.curve_to(pt(k), pt(k + 1), pt(k + 2)),
+                _ => {
+                    p.close_path();
+                    p.move_to(pt(k));
+                }
+            }
+        }
+        let doc = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path d="{}"/></svg>"#,
+            path_data(&p).unwrap()
+        );
+        let tree = usvg::Tree::from_str(&doc, &usvg::Options::default()).unwrap();
+        let Some(usvg::Node::Path(path)) = tree.root().children().first() else {
+            panic!("no path parsed");
+        };
+        let got = path.data().points();
+        assert_eq!(got.len(), expected.len());
+        for (g, e) in got.iter().zip(&expected) {
+            let r = |x: f64| (x * 1000.0).round() / 1000.0;
+            assert!(
+                (g.x as f64 - r(e.x)).abs() < 2e-4 && (g.y as f64 - r(e.y)).abs() < 2e-4,
+                "{g:?} vs {e:?}"
+            );
+        }
     }
 
     #[test]
@@ -410,6 +668,8 @@ mod tests {
         assert_eq!(sanitize_id("clip0").unwrap(), "_clip0");
         assert_eq!(sanitize_id("clip").unwrap(), "clip");
         assert_eq!(sanitize_id("clip1a").unwrap(), "clip1a");
+        assert_eq!(sanitize_id("p3").unwrap(), "_p3");
+        assert_eq!(sanitize_id("plant").unwrap(), "plant");
     }
 
     #[test]
@@ -427,10 +687,38 @@ mod tests {
         let c1 = s.find(r#"id="clip1""#).unwrap();
         assert!(c0 < c1);
         // clip0 (outer, 3x3) comes first in document order.
-        assert!(s[c0..c1].contains("M0 0L3 0"), "{s}");
+        assert!(s[c0..c1].contains("M0 0h3"), "{s}");
         assert!(s.contains("matrix(1 0 0 1 5 0)"), "{s}");
         // The only <g> elements are the transformed one, its clip and the inner clip.
         assert_eq!(s.matches("<g").count(), 3, "{s}");
+    }
+
+    #[test]
+    fn repeated_path_data_is_shared() {
+        // A leaf-like motif: the outline filled, clipping the detail, then stroked.
+        let mut outline = BezPath::new();
+        outline.move_to((0.0, 0.0));
+        outline.curve_to((10.0, -8.0), (30.0, -8.0), (40.0, 0.0));
+        outline.curve_to((30.0, 8.0), (10.0, 8.0), (0.0, 0.0));
+        outline.close_path();
+        let detail = Node::path(square(5.0, -2.0, 4.0), Style::fill(Color::WHITE));
+        let mut scene = Scene::new(50.0, 20.0);
+        scene.push(
+            Node::group(vec![
+                Node::path(outline.clone(), Style::fill(Color::rgb(0.2, 0.5, 0.2))),
+                Node::group(vec![detail]).clipped(outline.clone()),
+                Node::path(outline.clone(), Style::stroke(Color::BLACK, 0.5)),
+            ])
+            .with_transform(Affine::translate((5.0, 10.0))),
+        );
+        let s = to_svg_string(&scene);
+        let d = path_data(&outline).unwrap();
+        assert_eq!(s.matches(&format!(r#"d="{d}""#)).count(), 1, "{s}");
+        assert!(s.contains(&format!(r#"<path d="{d}" id="p0"/>"#)), "{s}");
+        assert_eq!(s.matches(r##"href="#p0""##).count(), 3, "{s}");
+        // Short path data stays inline.
+        assert!(!s.contains("p1"), "{s}");
+        assert_eq!(s, to_svg_string(&scene.clone()));
     }
 
     #[test]
