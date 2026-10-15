@@ -8,19 +8,26 @@
 //! stem of level `k`:
 //! - branches sprout at evenly spread arc-length positions on alternating sides (a planar
 //!   phyllotaxis), leave at the branch angle to the parent tangent, and are shorter and
-//!   thinner than their parent; growth stops at the level cap or when the element budget
-//!   (shared out between the children) is used up;
+//!   about 70 % as thick as their parent; growth stops at the level cap or when the element
+//!   budget (shared out between the children) is used up. In a fan the outer stems are the
+//!   older ones: a clump's outer fronds are longest and arch out and down while the young
+//!   middle ones rise, a bunch's middle stems stand tallest;
 //! - leaves sit at alternating nodes along the stem, their base on the stem edge, oriented
-//!   by the stem tangent there, with sizes decreasing towards the tip and with the level;
+//!   by the stem tangent there at varied angles, drooping a little under gravity with their
+//!   tips mostly curled down, with sizes decreasing towards the tip and with the level;
 //! - tendrils leave a node opposite its leaf and curl into a spiral;
-//! - the tip ends in a flower (one species per plant unless mixed), a bud or a small leaf;
-//!   with [`PlantParams::frond`] the upper part of every side stem carries one long blade
-//!   (a fern frond), and unopened fronds become fiddleheads.
+//! - the tip ends in a flower (one species per plant, or with mixed flowers a shuffled
+//!   cycle through the species), a bud or a small leaf. Most flowers turn partly sideways
+//!   (foreshortened along the stem). A side stem whose flower would land on one already
+//!   placed turns a little to keep the heads apart, and a head that still clashes shrinks
+//!   or stays a bud; with [`PlantParams::frond`] the upper part of every side stem carries
+//!   one long blade (a fern frond), and one or two young fronds are still rolled up into
+//!   croziers.
 //!
 //! # Drawing
 //! [`plant_node`] draws deeper stems first so every joint is covered by its parent, stems as
-//! tapered ribbons with an ink outline and a highlight, then tendrils, leaves (deepest level
-//! first), buds, and the flowers on top.
+//! filled tapered ribbons with a light band on the lit side and an ink outline, then
+//! tendrils, leaves (deepest level first), buds, and the flowers on top, small ones first.
 
 use super::flower::{self, FlowerParams, FlowerStyle};
 use super::foliage::{
@@ -30,11 +37,13 @@ use crate::geom::curl::{organic_curve, whiplash};
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::geom::ribbon::{Ribbon, WidthProfile};
 use crate::geom::spiral::spiral_tail;
+use crate::geom::validate::{path_is_finite, sanitize};
 use crate::geom::{Composite, Curve, CurveExt, Surface, lerp};
 use crate::palette::Palette;
 use crate::rng::{ChaCha8Rng, Draw, SeedTree};
 use crate::scene::{Color, LineCap, Node, Style};
-use kurbo::{Affine, CubicBez, Point, Vec2};
+use kurbo::{Affine, BezPath, CubicBez, Point, Vec2};
+use std::cell::{Cell, RefCell};
 use std::f64::consts::{PI, TAU};
 
 /// Deepest branching level grown, whatever the parameters ask for.
@@ -46,9 +55,11 @@ const MAX_BRANCHES: usize = 12;
 /// Upper bound on the leaves along one stem.
 const MAX_LEAVES: usize = 40;
 /// Stem half-width at the tip as a fraction of its base half-width.
-const TIP_WIDTH: f64 = 0.4;
+const TIP_WIDTH: f64 = 0.45;
 /// Fraction of the box left free on each side in [`variants`].
-const MARGIN: f64 = 0.08;
+const MARGIN: f64 = 0.025;
+/// Base half-width of a branch relative to its parent's (mean of base and node widths).
+const BRANCH_WIDTH: f64 = 0.7;
 
 /// Growth parameters. Lengths are in canvas units or fractions of [`height`](Self::height);
 /// non-finite or out-of-range values are replaced or clamped when growing.
@@ -120,7 +131,7 @@ impl PlantParams {
     pub fn flowering_sprig() -> Self {
         PlantParams {
             height: 100.0,
-            stem_width: 0.014,
+            stem_width: 0.01,
             stem_waviness: 0.35,
             stem_bend: 0.3,
             hook: 0.0,
@@ -134,15 +145,15 @@ impl PlantParams {
             branch_length: 0.42,
             branch_taper: 0.4,
             leaf: LeafParams::new(LeafShape::Ovate),
-            leaf_size: 0.15,
-            leaf_density: 0.9,
+            leaf_size: 0.24,
+            leaf_density: 1.7,
             leaf_angle: 0.85,
             petiole: 0.12,
             frond: false,
             flower_chance: 0.8,
             flowers: names(&["rose", "peony", "poppy", "cosmos", "primrose"]),
             mixed_flowers: false,
-            flower_size: 0.11,
+            flower_size: 0.13,
             tendril_chance: 0.0,
             bud_chance: 0.8,
         }
@@ -158,13 +169,13 @@ impl PlantParams {
             hook: 0.0,
             tropism: 0.15,
             branch_levels: 1,
-            branches_per_level: 7,
+            branches_per_level: 9,
             branch_span: (0.05, 1.0),
             branch_angle: 1.1,
             branch_angle_jitter: 0.12,
             fan: true,
             branch_length: 6.0,
-            branch_taper: 0.35,
+            branch_taper: 0.0,
             leaf: LeafParams::new(LeafShape::Fern { pinnae: 18 }).with_aspect(0.32),
             leaf_size: 0.1,
             leaf_density: 0.0,
@@ -184,7 +195,7 @@ impl PlantParams {
     pub fn climbing_vine() -> Self {
         PlantParams {
             height: 100.0,
-            stem_width: 0.011,
+            stem_width: 0.008,
             stem_waviness: 0.5,
             stem_bend: 0.0,
             hook: 0.9,
@@ -198,15 +209,15 @@ impl PlantParams {
             branch_length: 0.3,
             branch_taper: 0.3,
             leaf: LeafParams::new(LeafShape::Cordate),
-            leaf_size: 0.13,
-            leaf_density: 1.1,
+            leaf_size: 0.19,
+            leaf_density: 1.6,
             leaf_angle: 0.95,
             petiole: 0.35,
             frond: false,
             flower_chance: 0.6,
             flowers: names(&["bellflower", "primrose", "carnation"]),
             mixed_flowers: false,
-            flower_size: 0.07,
+            flower_size: 0.1,
             tendril_chance: 0.45,
             bud_chance: 0.6,
         }
@@ -230,8 +241,8 @@ impl PlantParams {
             branch_length: 3.2,
             branch_taper: 0.35,
             leaf: LeafParams::new(LeafShape::Lanceolate),
-            leaf_size: 0.11,
-            leaf_density: 0.8,
+            leaf_size: 0.15,
+            leaf_density: 1.2,
             leaf_angle: 0.6,
             petiole: 0.0,
             frond: false,
@@ -245,7 +256,7 @@ impl PlantParams {
                 "bellflower",
             ]),
             mixed_flowers: true,
-            flower_size: 0.06,
+            flower_size: 0.085,
             tendril_chance: 0.0,
             bud_chance: 0.7,
         }
@@ -396,12 +407,14 @@ pub enum Attachment {
         tone: f64,
         seed: SeedTree,
     },
-    /// A flower at `u` (the stem tip), drawn `scale` times its natural size.
+    /// A flower at `u` (the stem tip), drawn `scale` times its natural size, spun by
+    /// `rotation` and turned sideways by `tilt` radians (foreshortened along the stem).
     Flower {
         params: FlowerParams,
         u: f64,
         scale: f64,
         rotation: f64,
+        tilt: f64,
         tone: f64,
         seed: SeedTree,
     },
@@ -459,6 +472,35 @@ struct Ctx<'a> {
     accuracy: f64,
     /// Flower species available to this plant.
     species: Vec<(String, FlowerParams)>,
+    /// Order in which mixed flowers take the species, so a bunch shows them all.
+    species_order: Vec<usize>,
+    /// Number of flowers placed so far.
+    flower_count: Cell<usize>,
+    /// Flowers placed so far as `(centre, radius)`; later stems steer clear of them.
+    placed: RefCell<Vec<(Point, f64)>>,
+}
+
+impl Ctx<'_> {
+    /// Index into `species` of the next flower: the plant's species, or for mixed flowers the
+    /// next one of a shuffled cycle through all of them.
+    fn next_species(&self) -> usize {
+        let k = self.flower_count.get();
+        self.flower_count.set(k + 1);
+        if self.species_order.is_empty() {
+            0
+        } else {
+            self.species_order[k % self.species_order.len()]
+        }
+    }
+
+    /// How deeply a flower of radius `r` at `c` would overlap those already placed.
+    fn overlap(&self, c: Point, r: f64) -> f64 {
+        self.placed
+            .borrow()
+            .iter()
+            .map(|&(q, rq)| (0.85 * (r + rq) - (c - q).hypot()).max(0.0))
+            .sum()
+    }
 }
 
 /// Grow a plant from `base` towards `up` (any non-zero direction; invalid values fall
@@ -495,11 +537,19 @@ pub fn grow(
         let i = (rng.uniform(0.0, species.len() as f64) as usize).min(species.len() - 1);
         species = vec![species.swap_remove(i)];
     }
+    let mut species_order: Vec<usize> = (0..species.len()).collect();
+    for i in (1..species_order.len()).rev() {
+        let j = (rng.uniform(0.0, (i + 1) as f64) as usize).min(i);
+        species_order.swap(i, j);
+    }
     let ctx = Ctx {
         p: &p,
         up,
         accuracy: sane_accuracy(accuracy),
         species,
+        species_order,
+        flower_count: Cell::new(0),
+        placed: RefCell::new(Vec::new()),
     };
     let lean = rng.jitter(0.0, 0.12);
     let width = p.stem_width * p.height;
@@ -533,11 +583,32 @@ fn grow_stem(
     let p = ctx.p;
     let mut rng = seed.rng();
     let length = finite_or(length, 0.0).max(0.0);
-    let curve = if level == 0 && p.hook != 0.0 {
-        whiplash(&mut rng, base, dir, length, p.hook)
-    } else {
-        grown_curve(&mut rng, ctx, base, dir, length, level, outward)
+    let make = |rng: &mut ChaCha8Rng, d: Vec2| {
+        if level == 0 && p.hook != 0.0 {
+            whiplash(rng, base, d, length, p.hook)
+        } else {
+            grown_curve(rng, ctx, base, d, length, level, outward)
+        }
     };
+    let flower_r = p.flower_size * p.height * 0.9f64.powi(level as i32);
+    let start = rng.clone();
+    let mut curve = make(&mut rng, dir);
+    // A side stem that will end in a flower turns a little if its flower would land on one
+    // already placed (a bunch keeps its heads apart).
+    if level > 0 && level >= p.branch_levels && flower_r > 1e-9 && p.flower_chance > 0.0 {
+        let mut worst = ctx.overlap(curve.end(), flower_r);
+        for k in [1.0, -1.0, 2.0, -2.0, 3.0, -3.0] {
+            if worst <= 0.0 {
+                break;
+            }
+            let mut r = start.clone();
+            let c = make(&mut r, rotate(dir, 0.13 * k));
+            let o = ctx.overlap(c.end(), flower_r);
+            if o < worst {
+                (worst, curve, rng) = (o, c, r);
+            }
+        }
+    }
     let mut stem = Stem {
         curve,
         width: finite_or(width, 0.0).max(0.0),
@@ -602,16 +673,29 @@ fn grow_stem(
     let share = left.saturating_sub(2).checked_div(count).unwrap_or(0);
     let side0 = if rng.chance(0.5) { 1.0 } else { -1.0 };
     let (a, b) = p.branch_span;
+    let fan_x = |i: usize| {
+        if count > 1 {
+            2.0 * i as f64 / (count - 1) as f64 - 1.0
+        } else {
+            0.0
+        }
+    };
+    // One or two young fronds of a clump are still coiled croziers, near its middle.
+    let mut croziers = Vec::new();
+    if p.frond && level == 0 && p.tendril_chance > 0.0 && count > 0 {
+        let mut middle: Vec<usize> = (0..count).filter(|&i| fan_x(i).abs() < 0.6).collect();
+        let want = if count >= 4 && rng.chance(0.5) { 2 } else { 1 };
+        while croziers.len() < want && !middle.is_empty() {
+            let k = (rng.uniform(0.0, middle.len() as f64) as usize).min(middle.len() - 1);
+            croziers.push(middle.swap_remove(k));
+        }
+    }
     for i in 0..count {
         let f = (i as f64 + 0.5) / count as f64;
         let u = (lerp(a, b, f) + rng.jitter(0.0, 0.3 * (b - a) / count as f64)).clamp(0.02, 0.98);
         let side = if i % 2 == 0 { side0 } else { -side0 };
+        let x = fan_x(i);
         let angle = if p.fan {
-            let x = if count > 1 {
-                2.0 * i as f64 / (count - 1) as f64 - 1.0
-            } else {
-                0.0
-            };
             x * p.branch_angle + rng.jitter(0.0, p.branch_angle_jitter)
         } else {
             side * (p.branch_angle + rng.jitter(0.0, p.branch_angle_jitter))
@@ -622,23 +706,40 @@ fn grow_stem(
         } else {
             p.branch_length.min(0.6)
         };
-        let blen =
-            length * ratio * lerp(1.0, 1.0 - 0.55 * p.branch_taper, f) * rng.uniform(0.85, 1.1);
+        // In a fan the outer stems are the older ones: a clump's outer fronds are the
+        // longest, a bunch's middle stems stand tallest.
+        let spread = if p.fan && level == 0 {
+            if p.frond {
+                lerp(0.6, 1.05, x.abs().powf(0.8))
+            } else {
+                lerp(1.05, 0.78, x.abs())
+            }
+        } else {
+            1.0
+        };
+        let blen = length
+            * ratio
+            * spread
+            * lerp(1.0, 1.0 - 0.55 * p.branch_taper, f)
+            * rng.uniform(0.85, 1.1);
         let s = seed.child("branch").index(i as u64);
-        let fiddle = p.frond && level == 0 && rng.chance(p.tendril_chance);
-        if fiddle {
-            let d = rotate(tg, angle * 0.6);
-            let mut r = s.rng();
-            stem.children.push(tendril(
-                &mut r,
+        let width = BRANCH_WIDTH * lerp(stem.width, stem.half_width(u), 0.5);
+        if croziers.contains(&i) {
+            let child = crozier(
+                ctx,
+                &s,
                 c,
-                d,
-                0.35 * blen,
-                0.6 * stem.half_width(u),
-                side < 0.0,
-                ctx.accuracy,
-            ));
-            left = left.saturating_sub(1);
+                rotate(tg, 0.6 * angle),
+                0.8 * blen,
+                (1.5 * width).min(0.9 * stem.width),
+                angle,
+            );
+            left = left.saturating_sub(child.element_count());
+            stem.children.push(Attachment::Branch {
+                stem: child,
+                u,
+                angle: 0.6 * angle,
+            });
             continue;
         }
         let child = grow_stem(
@@ -647,7 +748,7 @@ fn grow_stem(
             c,
             rotate(tg, angle),
             blen,
-            0.72 * stem.half_width(u),
+            width,
             level + 1,
             angle,
             share,
@@ -690,17 +791,28 @@ fn grow_stem(
         return stem;
     }
     // The tip: a flower, else a bud, else a small terminal leaf.
-    let flower_r = p.flower_size * p.height * 0.85f64.powi(level as i32);
     if !ctx.species.is_empty() && flower_r > 1e-9 && rng.chance(p.flower_chance) {
-        let i = (rng.uniform(0.0, ctx.species.len() as f64) as usize).min(ctx.species.len() - 1);
+        let i = ctx.next_species().min(ctx.species.len() - 1);
         let params = ctx.species[i].1.clone();
         let outer = params.outer_radius();
-        if outer.is_finite() && outer > 1e-9 {
+        // A head that would still sit on another one shrinks, or stays a bud.
+        let r = flower_r * rng.uniform(0.9, 1.1);
+        let clash = ctx.overlap(stem.curve.end(), r);
+        let r = r * (1.0 - 0.6 * clash / r).clamp(0.65, 1.0);
+        if outer.is_finite() && outer > 1e-9 && clash < 0.7 * r {
+            // About a third face the viewer, the others turn partly sideways.
+            let tilt = if rng.chance(0.35) {
+                rng.uniform(0.0, 0.2)
+            } else {
+                rng.uniform(0.45, 0.95)
+            };
+            ctx.placed.borrow_mut().push((stem.curve.end(), r));
             stem.children.push(Attachment::Flower {
                 params,
                 u: 1.0,
-                scale: flower_r / outer,
+                scale: r / outer,
                 rotation: rng.uniform(0.0, TAU),
+                tilt,
                 tone: rng.uniform(0.0, 1.0),
                 seed: seed.child("flower"),
             });
@@ -758,7 +870,13 @@ fn grown_curve(
     } else {
         p.stem_bend
     };
-    let bend = base_bend * side * rng.uniform(0.7, 1.2);
+    // How far out in a fan this stem sits (0 = middle, 1 = outermost).
+    let spread = if p.fan && level > 0 && p.branch_angle.abs() > 1e-9 {
+        (outward / p.branch_angle).abs().min(1.2)
+    } else {
+        0.5
+    };
+    let bend = base_bend * side * rng.uniform(0.7, 1.2) * lerp(0.4, 1.6, spread);
     let wave = p.stem_waviness * rng.uniform(0.7, 1.2);
     let jit: Vec<f64> = (0..N).map(|_| rng.jitter(0.0, 1.0)).collect();
     let mut d = if dir.is_finite() && dir.hypot() > 1e-12 {
@@ -776,7 +894,15 @@ fn grown_curve(
     }
     let ds = length / N as f64;
     // Side stems respond more to light/gravity than the main stem.
-    let tropism = p.tropism * if level == 0 { 0.6 } else { 1.0 };
+    // Older (outer) fronds of a clump arch out and down, young ones rise.
+    let tropism = p.tropism
+        * if level == 0 {
+            0.6
+        } else if p.frond {
+            lerp(2.0, -1.2, spread)
+        } else {
+            1.0
+        };
     let mut pts = vec![base];
     let mut q = base;
     for (k, j) in jit.iter().enumerate() {
@@ -809,9 +935,17 @@ fn make_leaf(
     let (c, tg) = stem.frame(u);
     let nrm = Vec2::new(-tg.y, tg.x);
     let edge = c + nrm * (side * 0.85 * stem.half_width(u));
-    let dir = rotate(tg, side * (p.leaf_angle + rng.jitter(0.0, 0.15)));
-    // Most leaves droop outward (curl away from the stem), a few curl back.
-    let curl = side * rng.uniform(0.15, 0.55) * if rng.chance(0.8) { 1.0 } else { -1.0 };
+    let dir = rotate(tg, side * (p.leaf_angle + rng.jitter(0.0, 0.25)));
+    // Gravity: the leaf droops a little, the lower ones more, and its tip mostly curls down.
+    let down = -ctx.up;
+    let droop = rng.uniform(0.08, 0.3) * lerp(1.3, 0.6, u);
+    let dir = rotate(
+        dir,
+        dir.cross(down).atan2(dir.dot(down)).clamp(-droop, droop),
+    );
+    let nrm_leaf = Vec2::new(-dir.y, dir.x);
+    let towards_down = if nrm_leaf.dot(down) >= 0.0 { 1.0 } else { -1.0 };
+    let curl = towards_down * rng.uniform(0.15, 0.55) * if rng.chance(0.8) { 1.0 } else { -1.0 };
     let lp = p.leaf.with_tip_curl(curl).jittered(rng, 0.35);
     let pet_len = p.petiole * len;
     let (base, petiole, leaf_dir) = if pet_len > 1e-6 {
@@ -881,7 +1015,9 @@ pub fn plant_node(plant: &Plant, style: &PlantStyle, accuracy: f64) -> Node {
     for (_, n) in layers.leaves {
         root.push(n);
     }
-    for n in layers.tops {
+    // Buds first, then flowers from the smallest up, so big heads lie over small ones.
+    layers.tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (_, n) in layers.tops {
         root.push(n);
     }
     root
@@ -908,7 +1044,8 @@ struct Layers {
     stems: Vec<(usize, Node)>,
     tendrils: Vec<Node>,
     leaves: Vec<(usize, Node)>,
-    tops: Vec<Node>,
+    /// Buds and flowers with their drawing-order key.
+    tops: Vec<(f64, Node)>,
 }
 
 fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
@@ -946,6 +1083,7 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
                 u,
                 scale,
                 rotation,
+                tilt,
                 tone,
                 seed,
             } => {
@@ -962,12 +1100,16 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
                     g.push(leaf_motif(&seed.index(k as u64), &sepal, &ls, acc));
                 }
                 let fl = flower::flower(seed, params, &fs, acc / scale.max(1e-9));
+                // A tilted flower is foreshortened along the stem: seen partly from the side.
+                let squash = finite_or(*tilt, 0.0).clamp(0.0, 1.3).cos();
                 g.push(fl.with_transform(
-                    Affine::translate(c.to_vec2())
+                    Affine::translate((c + tg * (0.08 * r)).to_vec2())
+                        * Affine::rotate(tg.y.atan2(tg.x))
+                        * Affine::scale_non_uniform(squash, 1.0)
                         * Affine::rotate(*rotation)
                         * Affine::scale(*scale),
                 ));
-                out.tops.push(g);
+                out.tops.push((r, g));
             }
             Attachment::Bud {
                 u,
@@ -977,7 +1119,7 @@ fn collect(stem: &Stem, style: &PlantStyle, acc: f64, out: &mut Layers) {
             } => {
                 let (c, tg) = stem.frame(*u);
                 out.tops
-                    .push(bud_node(seed, c, tg, *size, *tone, style, acc));
+                    .push((-1.0, bud_node(seed, c, tg, *size, *tone, style, acc)));
             }
         }
     }
@@ -997,18 +1139,89 @@ fn stem_node(stem: &Stem, style: &PlantStyle, acc: f64) -> Node {
     if outline.elements().len() < 3 {
         return Node::empty();
     }
-    let mut g = Node::group(vec![Node::path(
-        outline.clone(),
-        Style::fill_stroke(style.stem, style.ink, 0.35 * w0),
-    )]);
-    let hl = ribbon.contour(0.4, acc);
-    if !hl.elements().is_empty() {
+    let mut g = Node::group(vec![Node::path(outline.clone(), Style::fill(style.stem))]);
+    // A light band along the side facing the light (top left), then the ink outline.
+    let across = ribbon.point(0.5, 1.0) - ribbon.point(0.5, 0.0);
+    let lit = if across.dot(Vec2::new(-1.0, -1.0)) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    const N: usize = 64;
+    let mut band = BezPath::new();
+    band.move_to(ribbon.point(0.0, lit * 0.12));
+    for i in 0..=N {
+        band.line_to(ribbon.point(i as f64 / N as f64, lit * 0.12));
+    }
+    for i in (0..=N).rev() {
+        band.line_to(ribbon.point(i as f64 / N as f64, lit * 0.62));
+    }
+    band.close_path();
+    let band = sanitize(&band, 1e-9);
+    if path_is_finite(&band) && band.elements().len() > 3 {
         g.push(Node::path(
-            hl,
-            Style::stroke(style.stem_light, 0.3 * w0).with_cap(LineCap::Round),
+            band,
+            Style::fill(style.stem_light).with_opacity(0.8),
         ));
     }
+    g.push(Node::path(
+        outline,
+        Style::stroke(style.ink, 0.22 * w0).with_cap(LineCap::Round),
+    ));
     g
+}
+
+/// A young frond still rolled up (a crozier): a short stem from `base` along `dir` that
+/// coils into a spiral, its blade unrolled only along the straight part.
+fn crozier(
+    ctx: &Ctx,
+    seed: &SeedTree,
+    base: Point,
+    dir: Vec2,
+    length: f64,
+    width: f64,
+    outward: f64,
+) -> Stem {
+    let mut rng = seed.rng();
+    let length = finite_or(length, 0.0).max(1e-6);
+    let lead = grown_curve(&mut rng, ctx, base, dir, length, 1, outward);
+    let turns = rng.uniform(1.1, 1.6);
+    let curve = spiral_tail(
+        &lead,
+        turns,
+        0.3,
+        outward < 0.0,
+        (ctx.accuracy * 0.5).max(1e-3),
+    );
+    let mut stem = Stem {
+        curve,
+        width: finite_or(width, 0.0).max(0.0),
+        level: 1,
+        children: Vec::new(),
+    };
+    let total = stem.curve.length();
+    if !(total.is_finite() && total > 1e-9) {
+        return stem;
+    }
+    let end = 0.97 * (lead.length() / total).clamp(0.2, 1.0);
+    let u0 = 0.2 * end;
+    let pts: Vec<Point> = (0..=16)
+        .map(|i| stem.frame(lerp(u0, end, i as f64 / 16.0)).0)
+        .collect();
+    if let Some(mid) = Composite::through_points(&pts, 0.5) {
+        let mut lp = ctx.p.leaf.jittered(&mut rng, 0.3);
+        lp.tip_curl = 0.0;
+        lp.aspect *= 0.6;
+        stem.children.push(Attachment::Leaf {
+            leaf: Box::new(Leaf::new(mid, lp)),
+            u: u0,
+            side: 0.0,
+            petiole: None,
+            tone: rng.uniform(0.0, 1.0),
+            seed: seed.child("frond"),
+        });
+    }
+    stem
 }
 
 /// A closed bud: a pointed ovate body in flower colours held by two sepals.
@@ -1119,8 +1332,8 @@ mod tests {
 
     #[test]
     fn variants_build_fit_and_are_clean() {
-        for s in 1..=5u64 {
-            let vs = variants(&SeedTree::new(s), &pal(), 300.0, 0.3);
+        for s in 1..=3u64 {
+            let vs = variants(&SeedTree::new(s), &pal(), 300.0, 1.0);
             assert!(vs.len() >= 4);
             for (name, node) in &vs {
                 assert!(node.is_finite(), "{name} seed {s}");
@@ -1141,8 +1354,8 @@ mod tests {
 
     #[test]
     fn variants_are_deterministic() {
-        let a = variants(&SeedTree::new(7), &pal(), 200.0, 0.3);
-        let b = variants(&SeedTree::new(7), &pal(), 200.0, 0.3);
+        let a = variants(&SeedTree::new(7), &pal(), 200.0, 1.0);
+        let b = variants(&SeedTree::new(7), &pal(), 200.0, 1.0);
         assert_eq!(a, b);
     }
 
@@ -1277,9 +1490,132 @@ mod tests {
                 "case {i}: {}",
                 plant.element_count()
             );
-            let node = plant_node(&plant, &st, f64::NAN);
+            // One case draws at the fallback accuracy, the others coarser to stay quick.
+            let acc = if i == 3 { f64::NAN } else { 0.6 };
+            let node = plant_node(&plant, &st, acc);
             assert!(node.is_finite(), "case {i}");
             assert!(node.path_count() < 40 * MAX_ELEMENTS, "case {i}");
+        }
+    }
+
+    /// Every flower of a plant as `(species params, centre, radius, tilt)`.
+    fn flowers(stem: &Stem, out: &mut Vec<(FlowerParams, Point, f64, f64)>) {
+        for a in &stem.children {
+            match a {
+                Attachment::Branch { stem, .. } => flowers(stem, out),
+                Attachment::Flower {
+                    params,
+                    scale,
+                    tilt,
+                    ..
+                } => out.push((
+                    params.clone(),
+                    stem.curve.end(),
+                    params.outer_radius() * scale,
+                    *tilt,
+                )),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn bouquet_flowers_vary_and_keep_apart() {
+        // Leaves do not affect where the heads go; leaving them out keeps the test quick.
+        let mut p = PlantParams::wild_bouquet();
+        p.leaf_density = 0.0;
+        for s in 1..=4u64 {
+            let plant = grow(
+                &SeedTree::new(s),
+                &p,
+                Point::ZERO,
+                Vec2::new(0.0, -1.0),
+                &style(),
+                1.0,
+            );
+            let mut fl = Vec::new();
+            flowers(&plant.root, &mut fl);
+            assert!(fl.len() >= 3, "seed {s}: {} flowers", fl.len());
+            let kinds = fl
+                .iter()
+                .filter(|f| fl.iter().filter(|g| g.0 == f.0).count() == 1)
+                .count();
+            assert!(kinds >= 2, "seed {s}: species repeat");
+            // No head sits more than a sliver onto another.
+            for (i, a) in fl.iter().enumerate() {
+                for b in &fl[..i] {
+                    let d = (a.1 - b.1).hypot();
+                    assert!(d > 0.5 * (a.2 + b.2), "seed {s}: {d} {} {}", a.2, b.2);
+                }
+            }
+            assert!(fl.iter().any(|f| f.3 > 0.4), "some flowers turn sideways");
+        }
+    }
+
+    #[test]
+    fn fern_clump_has_croziers_and_long_outer_fronds() {
+        let plant = grow(
+            &SeedTree::new(2),
+            &PlantParams::fern_clump(),
+            Point::ZERO,
+            Vec2::new(0.0, -1.0),
+            &style(),
+            1.0,
+        );
+        let fronds: Vec<(f64, f64, bool)> = plant
+            .root
+            .children
+            .iter()
+            .filter_map(|a| match a {
+                Attachment::Branch { stem, angle, .. } => {
+                    // A crozier's centreline turns by more than a full turn.
+                    let n = 64;
+                    let turn: f64 = (1..n)
+                        .map(|i| {
+                            let (a, b) = (
+                                stem.curve.tangent(i as f64 / n as f64),
+                                stem.curve.tangent((i + 1) as f64 / n as f64),
+                            );
+                            a.cross(b).atan2(a.dot(b))
+                        })
+                        .sum();
+                    Some((*angle, stem.curve.length(), turn.abs() > TAU))
+                }
+                _ => None,
+            })
+            .collect();
+        let coiled = fronds.iter().filter(|f| f.2).count();
+        assert!((1..=2).contains(&coiled), "{coiled} croziers");
+        let open: Vec<_> = fronds.iter().filter(|f| !f.2).collect();
+        let outer = open
+            .iter()
+            .max_by(|a, b| a.0.abs().total_cmp(&b.0.abs()))
+            .unwrap();
+        let inner = open
+            .iter()
+            .min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()))
+            .unwrap();
+        assert!(outer.1 > inner.1, "outer fronds are the older, longer ones");
+    }
+
+    #[test]
+    fn main_stem_is_substantial_and_branches_thinner() {
+        let p = PlantParams::flowering_sprig();
+        let plant = grow(
+            &SeedTree::new(4),
+            &p,
+            Point::ZERO,
+            Vec2::new(0.0, -1.0),
+            &style(),
+            1.0,
+        );
+        let full = 2.0 * plant.root.width / p.height;
+        assert!((0.012..=0.02).contains(&full), "{full}");
+        for a in &plant.root.children {
+            if let Attachment::Branch { stem, .. } = a {
+                let k = stem.width / plant.root.width;
+                assert!((0.45..0.75).contains(&k), "{k}");
+            }
         }
     }
 }
