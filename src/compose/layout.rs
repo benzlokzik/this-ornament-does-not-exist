@@ -183,6 +183,8 @@ impl Budget {
 pub enum Layer {
     /// Tonal background shapes.
     Background,
+    /// The open landscape (sky, moon, hills) painted across the cool region.
+    Landscape,
     /// Dim, low-contrast foliage filling the gaps.
     BackFoliage,
     /// The moonlit opening and its frame.
@@ -197,8 +199,9 @@ pub enum Layer {
     Foreground,
 }
 
-const LAYERS: [(Layer, &str); 7] = [
+const LAYERS: [(Layer, &str); 8] = [
     (Layer::Background, "background"),
+    (Layer::Landscape, "landscape"),
     (Layer::BackFoliage, "back-foliage"),
     (Layer::Opening, "opening"),
     (Layer::Ribbons, "ribbons"),

@@ -4,7 +4,7 @@
 //! by an ink rim and a wreath of small leaves and petals.
 
 use super::field::{Region, along_curve};
-use super::layout::{leaf_style, ramp, unit_or};
+use super::layout::{Canvas, leaf_style, ramp, unit_or};
 use crate::geom::Composite;
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
 use crate::motif::foliage::leaf_motif;
@@ -269,6 +269,20 @@ fn wreath(seed: &SeedTree, outline: &BezPath, r: f64, palette: &Palette, accurac
         }
     }
     Node::group(vec![leaves, petals])
+}
+
+/// The open landscape (TODO: implemented by a parallel agent): sky, moon, stars, clouds
+/// and hills painted across the cool region without a frame, as one node in canvas
+/// coordinates. `fill` scales the amount of detail elements.
+pub fn open_landscape(
+    seed: &SeedTree,
+    canvas: &Canvas,
+    palette: &Palette,
+    fill: f64,
+    accuracy: f64,
+) -> Node {
+    let _ = (seed, canvas, palette, fill, accuracy);
+    Node::empty()
 }
 
 #[cfg(test)]

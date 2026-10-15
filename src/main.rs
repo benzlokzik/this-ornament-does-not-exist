@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::builder::styling::{AnsiColor, Styles};
 use clap::{ColorChoice, Parser, Subcommand};
 use orna::compose::gallery::{self, GalleryOptions};
-use orna::config::{Config, Preset};
+use orna::config::{Background, Config, Landscape, Preset};
 use orna::render;
 use orna::scene::Scene;
 use owo_colors::OwoColorize;
@@ -81,9 +81,12 @@ enum Command {
         /// Motif density multiplier for the presets.
         #[arg(long, default_value_t = 1.0)]
         density: f64,
-        /// Leave out the moonlit opening (botanica preset).
-        #[arg(long)]
-        no_opening: bool,
+        /// Landscape mode of the botanica preset.
+        #[arg(long, value_enum)]
+        landscape: Option<Landscape>,
+        /// Background fill of the botanica preset.
+        #[arg(long, value_enum)]
+        background: Option<Background>,
         /// PNG scale factor relative to the SVG size.
         #[arg(long, default_value_t = 1.0)]
         scale: f64,
@@ -147,7 +150,8 @@ fn run(command: Command) -> anyhow::Result<()> {
             palette,
             detail,
             density,
-            no_opening,
+            landscape,
+            background,
             scale,
             config,
             save_config,
@@ -189,8 +193,11 @@ fn run(command: Command) -> anyhow::Result<()> {
             if given("--density") {
                 cfg.density = density;
             }
-            if no_opening {
-                cfg.opening = false;
+            if let Some(l) = landscape {
+                cfg.landscape = l;
+            }
+            if let Some(b) = background {
+                cfg.background = b;
             }
             cfg.validate()?;
             let scene = orna::compose::generate(&cfg).with_context(|| {

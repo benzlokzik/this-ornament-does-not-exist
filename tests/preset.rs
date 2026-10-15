@@ -104,12 +104,19 @@ fn check_preset(preset: Preset, extra: &[Config]) -> Vec<Scene> {
 
 #[test]
 fn botanica() {
-    let no_opening = Config {
-        opening: false,
+    use orna::config::{Background, Landscape};
+    // The framed window and the sprig background keep their own layers.
+    let windowed = Config {
+        landscape: Landscape::Window,
+        background: Background::Sprigs,
         ..config(Preset::Botanica, 2)
     };
-    let scenes = check_preset(Preset::Botanica, std::slice::from_ref(&no_opening));
-    let names = layer_names(&scenes[1]);
+    let no_landscape = Config {
+        landscape: Landscape::None,
+        ..windowed.clone()
+    };
+    let scenes = check_preset(Preset::Botanica, &[windowed.clone(), no_landscape.clone()]);
+    let names = layer_names(&scenes[4]);
     for layer in [
         "background",
         "back-foliage",
@@ -123,8 +130,10 @@ fn botanica() {
             "missing {layer}: {names:?}"
         );
     }
-    assert!(!layer_names(&scenes[4]).iter().any(|n| n == "opening"));
-    check_scene(&no_opening, &scenes[4]);
+    check_scene(&windowed, &scenes[4]);
+    let names = layer_names(&scenes[5]);
+    assert!(!names.iter().any(|n| n == "opening" || n == "landscape"));
+    check_scene(&no_landscape, &scenes[5]);
 }
 
 #[test]
