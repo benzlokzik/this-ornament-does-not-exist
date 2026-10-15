@@ -22,6 +22,9 @@ const MAX_REPARAM: usize = 50;
 /// Reparameterisation stops early once a round fails to shrink the squared error below
 /// this fraction of the previous one.
 const REPARAM_PROGRESS: f64 = 0.98;
+/// A fitted cubic's control polygon may be at most this many times the length of the
+/// polyline it approximates.
+const MAX_POLYGON: f64 = 2.5;
 /// Depth after which [`fit_cubic`] splits runs in half instead of at the worst point, which
 /// bounds the recursion by `MAX_DEPTH + log₂(n)`.
 const MAX_DEPTH: usize = 48;
@@ -555,7 +558,16 @@ fn generate_bezier(pts: &[Point], u: &[f64], t1: Vec2, t2: Vec2) -> CubicBez {
     };
     let seg_len = (p3 - p0).hypot();
     let eps = 1e-6 * seg_len;
-    if !(al.is_finite() && ar.is_finite()) || al < eps || ar < eps {
+    // A control polygon much longer than the run itself means the solution loops out
+    // between the samples (sparse, folded runs); the fallback then fails the error test
+    // and the run is split instead.
+    let run: f64 = pts.windows(2).map(|w| (w[1] - w[0]).hypot()).sum();
+    let polygon = |al: f64, ar: f64| al + ((p3 + t2 * ar) - (p0 + t1 * al)).hypot() + ar;
+    if !(al.is_finite() && ar.is_finite())
+        || al < eps
+        || ar < eps
+        || polygon(al, ar) > MAX_POLYGON * run
+    {
         al = seg_len / 3.0;
         ar = seg_len / 3.0;
     }
@@ -820,6 +832,37 @@ pub(crate) mod tests {
         let dot = FnCurve(|_t: f64| Point::new(1.0, 2.0));
         assert!(fit_curve(&dot, 0.1).elements().is_empty());
         assert_eq!(fit_curve(&spiral, 0.1), fit_curve(&spiral, 0.1));
+    }
+
+    #[test]
+    fn sparse_jagged_samples_never_fling_handles() {
+        // Few samples of rippled, folded edges (a fringed petal): least squares alone can
+        // answer with huge handles that pass the samples but loop far outside them.
+        for k in 0..200 {
+            let f = 3.0 + (k % 17) as f64 * 0.7;
+            let n = 8 + k % 40;
+            let pts: Vec<Point> = (0..n)
+                .map(|i| {
+                    let t = i as f64 / (n - 1) as f64;
+                    let r = 10.0 + 4.0 * (f * std::f64::consts::TAU * t + k as f64).sin().abs();
+                    let a = 0.4 * k as f64 + 2.5 * t;
+                    Point::new(r * a.cos() + 30.0 * t, r * a.sin())
+                })
+                .collect();
+            let tol = 0.02 + 0.01 * (k % 5) as f64;
+            let p = fit_points(&pts, tol);
+            let bb = pts
+                .iter()
+                .fold(kurbo::Rect::from_points(pts[0], pts[0]), |b, q| {
+                    b.union_pt(*q)
+                })
+                .inflate(2.0, 2.0);
+            let fb = kurbo::Shape::bounding_box(&p);
+            assert!(
+                bb.contains(fb.origin()) && bb.contains(Point::new(fb.x1, fb.y1)),
+                "case {k}: fit {fb:?} leaves samples {bb:?}"
+            );
+        }
     }
 
     #[test]
