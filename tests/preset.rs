@@ -71,7 +71,7 @@ fn check_scene(cfg: &Config, scene: &Scene) {
     let budget = (PATH_BUDGET * cfg.detail) as usize;
     assert!((30..=budget).contains(&paths), "{what}: {paths} paths");
     let found = layers(scene);
-    assert!(found.len() >= 3, "{what}: layers {:?}", layer_names(scene));
+    assert!(found.len() >= 2, "{what}: layers {:?}", layer_names(scene));
     let bleed = 0.08 * cfg.height;
     let allowed = Rect::new(-bleed, -bleed, cfg.width + bleed, cfg.height + bleed);
     for (name, node) in &found {

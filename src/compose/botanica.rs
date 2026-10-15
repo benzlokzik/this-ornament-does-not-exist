@@ -293,7 +293,7 @@ pub(crate) fn compose(config: &Config, palette: &Palette) -> (Canvas, Layers) {
             let warm = canvas.is_warm(Point::new(base.x, 0.9 * h));
             let by_divider = (x - div_x).abs() < 0.06 * w;
             let mut params = if warm {
-                let mut p = if prng.chance(0.5) {
+                let mut p = if prng.chance(0.7) {
                     PlantParams::flowering_sprig()
                 } else {
                     PlantParams {

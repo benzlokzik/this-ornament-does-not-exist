@@ -962,17 +962,35 @@ pub(crate) fn divider_band(
     // Companion band on the cool side: it leaves the top edge alongside the divider, keeps
     // clear of what is already placed (the opening) and rolls up where it parts from it.
     let b = rng.uniform(0.5, 0.66);
-    let off = 3.2 * hw;
-    let pts: Vec<Point> = (0..=40)
-        .map(|i| {
-            let t = b * i as f64 / 40.0;
-            let p = body.point(t);
-            let n = body.normal(t);
-            // Push towards the cool side (+x in the warm-left frame).
-            let s = if n.x >= 0.0 { 1.0 } else { -1.0 };
-            p + n * (s * off)
-        })
-        .collect();
+    // Offset along the normal towards the cool side (+x in the warm-left frame), with one
+    // sign for the whole band so it never flips across.
+    // Where the divider bends tighter than the offset, the offset points fold back; those
+    // are dropped so the companion stays smooth.
+    // It starts where the divider enters the canvas.
+    let t0 = (0..=200)
+        .map(|i| b * i as f64 / 200.0)
+        .find(|&t| body.point(t).y >= -0.01 * canvas.height)
+        .unwrap_or(0.0);
+    let ts: Vec<f64> = (0..=16).map(|i| t0 + (b - t0) * i as f64 / 16.0).collect();
+    let mean_nx = ts.iter().map(|&t| body.normal(t).x).sum::<f64>();
+    let off = 3.2 * hw * if mean_nx >= 0.0 { 1.0 } else { -1.0 };
+    // Inside a bend tighter than the offset allows, the band would fold into an elbow:
+    // such stretches split it, and the longest smooth run is kept.
+    let mut runs: Vec<Vec<Point>> = vec![Vec::new()];
+    for &t in &ts {
+        let k = body.curvature(t);
+        let inner = k * off > 0.0 && k.abs() * 2.5 * off.abs() > 1.0;
+        if inner {
+            if runs.last().is_some_and(|r| !r.is_empty()) {
+                runs.push(Vec::new());
+            }
+            continue;
+        }
+        if let Some(r) = runs.last_mut() {
+            r.push(body.point(t) + body.normal(t) * off);
+        }
+    }
+    let pts = runs.into_iter().max_by_key(Vec::len).unwrap_or_default();
     let free = |p: Point| !occ.contains(p);
     let comp = Composite::through_points(&pts, 0.5)
         .and_then(|c| Composite::from_bezpath(&fit_curve(&c, accuracy)))
@@ -988,13 +1006,34 @@ pub(crate) fn divider_band(
             &blocked,
             accuracy,
         );
-        let comp = with_tails(&comp, None, tail, accuracy);
+        // Off the top edge the band simply bleeds; otherwise it rolls up there too.
+        let (comp, head) = if comp.start().y < 0.01 * canvas.height {
+            (comp, None)
+        } else {
+            tail_or_trim_start(
+                &mut rng,
+                &comp,
+                chw,
+                canvas.inner(0.02 * u),
+                &blocked,
+                accuracy,
+            )
+        };
+        let open_start = comp.start().y < 0.01 * canvas.height;
+        let comp = with_tails(&comp, head, tail, accuracy);
         let style = ribbon_style(palette, 0.0, rng.uniform(0.15, 0.4));
         let node = scroll_ribbon(
             &seed.child("companion"),
             &comp,
             chw,
-            (0.0, 0.02),
+            (
+                if open_start || head.is_some() {
+                    0.0
+                } else {
+                    0.14
+                },
+                0.02,
+            ),
             1,
             &style,
             accuracy,

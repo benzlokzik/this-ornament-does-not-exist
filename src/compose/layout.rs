@@ -47,7 +47,7 @@ impl Canvas {
         let bulge = rng.uniform(-0.12, 0.12);
         let start = Point::new(x0, -0.05 * height);
         let end = Point::new(x1, 1.05 * height);
-        let divider = organic_curve(&mut rng, start, end, wave.min(0.9), bulge);
+        let divider = organic_curve(&mut rng, start, end, wave.min(0.7), bulge);
         let mut samples: Vec<Point> = divider
             .sample_by_arclen(256)
             .into_iter()
