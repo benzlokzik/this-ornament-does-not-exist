@@ -12,14 +12,15 @@
 //! compositions can attach them to the end of a guide curve; they return the motif and the
 //! [`MotifEnd`] at the spiral's eye. [`variants`] assembles named demonstration spirals.
 
+use super::foliage::{LeafStyle, VeinWidths};
 use super::ribbon::{
-    Builder, RibbonParams, RibbonStyle, Sheet, build_all, coil_ratio, coiled, coin, leaf_params,
-    reversed, to_composite,
+    Builder, RibbonParams, RibbonStyle, Sheet, build_all, coil_ratio, coiled, coin, reversed,
+    to_composite,
 };
 use crate::geom::curl::whiplash;
 use crate::geom::fit::{fit_curve, join_g1, stub, unit_or};
 use crate::geom::leaf::{Leaf, LeafParams, LeafShape};
-use crate::geom::ribbon::{Ribbon, WidthProfile};
+use crate::geom::ribbon::{Ribbon, WidthProfile, ease};
 use crate::geom::spiral::{ArchimedeanSpiral, LogSpiral, spiral_tail};
 use crate::geom::{Composite, Curve, EPS, Surface, lerp, smoothstep};
 use crate::palette::Palette;
@@ -58,7 +59,7 @@ pub struct SpiralParams {
     pub clockwise: bool,
     /// Contour stripes per side.
     pub stripes: usize,
-    /// Start with an open rounded end at full width instead of a pointed taper.
+    /// Start broad and close in a short, sharp point instead of a long taper.
     pub open_start: bool,
 }
 
@@ -204,9 +205,8 @@ fn spiral_ribbon_in(
     let coil = coil_centerline(start, dir, length, p, sh.acc);
     let c = finite_or(p.width, 0.25).clamp(0.02, 0.6);
     let body = if p.open_start {
-        // A slight trumpet flare makes the open end read as a cut, curling band.
-        WidthProfile::tapered(c * coil.r0, 0.0, 0.05, 0.9)
-            .map(|u, w| w * (1.0 + 0.22 * (1.0 - smoothstep(u / 0.07))))
+        // A broad start closing in a short, sharp point.
+        WidthProfile::tapered(c * coil.r0, 0.12, 0.05, 0.9)
     } else {
         WidthProfile::tapered(c * coil.r0, 0.12, 0.05, 0.9)
     };
@@ -253,10 +253,11 @@ fn stub_end(start: Point, direction: Vec2) -> MotifEnd {
     }
 }
 
-/// A fern crozier growing from `start` along `direction`: a stem that bends into a tight
-/// coil of 2–2.6 turns, with rounded leaflets along its outer edge that shrink with the
-/// coil and lean towards the eye. `length` is the centreline's arc length; shape details
-/// come from `seed`. Returns the motif and the eye. Invalid `length` gives an empty node.
+/// A fern crozier growing from `start` along `direction`: a banded stem that bends into a
+/// tight coil of 2–2.6 turns, with discrete rounded pinnae (each with its own vein) along
+/// its outer edge that shrink smoothly with the coil and lean towards the eye. `length` is
+/// the centreline's arc length; shape details come from `seed`. Returns the motif and the
+/// eye. Invalid `length` gives an empty node.
 pub fn crozier(
     seed: &SeedTree,
     start: Point,
@@ -292,47 +293,70 @@ fn crozier_in(
     let coil = coil_centerline(start, dir, length, &p, sh.acc);
     let c = coil_ratio(p.turns, p.end_ratio);
     let w0 = c * coil.r0;
-    let inner = coiled(
-        WidthProfile::tapered(1.1 * w0, 0.0, 0.04, 0.8),
+    let profile = coiled(
+        // a rounded foot (power 0.5) at the start
+        WidthProfile::tapered(1.1 * w0, 0.0, 0.04, 0.8).map(|u, w| w * ease(u / 0.025, 0.5)),
         &coil.curve,
         c,
     );
-    // Leaflet phase: one leaflet per ~3.2 local widths, so they shrink with the coil.
-    const N: usize = 512;
-    let mut phase = vec![0.0; N + 1];
-    for i in 1..=N {
-        let u = (i as f64 - 0.5) / N as f64;
-        let spacing = 3.2 * inner.eval(u).max(0.2 * w0);
-        phase[i] = phase[i - 1] + length / N as f64 / spacing;
-    }
-    let amp = rng.uniform(0.55, 0.75);
-    let skew = rng.uniform(0.65, 0.8);
-    let outer = inner.clone().map(move |u, w| {
-        let x = u.clamp(0.0, 1.0) * N as f64;
-        let i = (x.floor() as usize).min(N - 1);
-        let ph = lerp(phase[i], phase[i + 1], x - i as f64);
-        // Rounded lobes with narrow notches between them, their crests shifted forward.
-        let f = ph.fract().powf(skew);
-        let bump = (PI * f).sin().powf(0.7);
-        let fade = smoothstep((u - 0.1) / 0.1) * (1.0 - smoothstep((u - 0.86) / 0.1));
-        w * (1.0 + amp * fade * bump)
-    });
-    let (left, right) = if clockwise {
-        (outer, inner)
-    } else {
-        (inner, outer)
-    };
     let params = RibbonParams {
         stripes: 1,
-        stripe_inset: 0.45,
-        centre_stripe: true,
         lit_side: if clockwise { -1.0 } else { 1.0 },
-        lean: 0.2,
-        ..RibbonParams::new(left, right)
+        ..RibbonParams::symmetric(profile)
     };
     let end = end_of(&coil.curve);
-    let (node, _) = sh.ribbon("crozier", seed, coil.curve, &params, style);
-    (node, end)
+    let (stipe, ribbon) = sh.ribbon("crozier", seed, coil.curve, &params, style);
+
+    // Pinnae along the outer edge from just before the coil to near the eye, each sized
+    // and spaced by the local stem width, so they shrink smoothly into the coil. They grow
+    // from under the stem and lean towards the eye.
+    let outer = if clockwise { 1.0 } else { -1.0 };
+    let pinna_style = LeafStyle {
+        fill: style.fill,
+        fill_light: style.highlight.mix(style.fill, 0.35),
+        ink: style.ink,
+        vein: style.stripe,
+        widths: VeinWidths {
+            outline: 0.035,
+            midrib: 0.06,
+            lateral: 0.0,
+            veinlet: 0.0,
+            hatch: 0.02,
+        },
+    };
+    let u_start = (coil.lead_len / length - 0.12).max(0.12);
+    let (u_end, size) = (0.86, rng.uniform(2.2, 2.5));
+    let lean = rng.uniform(0.7, 0.85);
+    let total = ribbon.length();
+    let cl = ribbon.centerline();
+    let mut pinnae = Node::empty();
+    let mut u = u_start;
+    let mut i = 0;
+    while u < u_end && i < 200 {
+        let hw = ribbon.half_width(u);
+        if !(hw.is_finite() && hw > EPS && total > EPS) {
+            break;
+        }
+        let fade = lerp(0.55, 1.0, smoothstep((u - u_start) / 0.08))
+            * lerp(1.0, 0.5, smoothstep((u - 0.7) / (u_end - 0.7)));
+        let t = ribbon.t_at(u);
+        let a = lean + rng.jitter(0.0, 0.06);
+        let d = cl.normal(t) * (outer * a.cos()) + cl.tangent(t) * a.sin();
+        let len = size * hw * fade;
+        let leaf = Leaf::from_base(
+            ribbon.point(u, 0.55 * outer),
+            d,
+            len,
+            len * rng.uniform(0.7, 0.8),
+            LeafParams::new(LeafShape::Ovate)
+                .with_points(0.3, 0.0)
+                .with_tip_curl(-outer * rng.uniform(0.15, 0.3)),
+        );
+        pinnae.push(sh.foliage("crozier-pinna", &seed.index(i), leaf, &pinna_style));
+        u += 1.05 * hw * fade / total;
+        i += 1;
+    }
+    (Node::group(vec![pinnae, stipe]), end)
 }
 
 const BUILDERS: [(&str, Builder); 7] = [
@@ -393,8 +417,8 @@ fn crozier_variant(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     crozier_in(sh, seed, start, dir, 2.0 * sh.size, cw, &style).0
 }
 
-/// An Ionic volute: a broad band that rolls into nearly three turns around a round eye,
-/// with three nested stripes per side.
+/// An Ionic volute: a broad band with three contour lines per side that rolls into nearly
+/// three turns around an open eye; its bands run on into the eye and end in a ball.
 fn volute(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let turns = rng.uniform(2.6, 3.0);
@@ -416,7 +440,11 @@ fn volute(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         &p,
         sh.acc,
     );
-    let profile = coiled(WidthProfile::constant(c * coil.r0), &coil.curve, c);
+    let profile = coiled(
+        WidthProfile::tapered(c * coil.r0, 0.08, 0.0, 0.8),
+        &coil.curve,
+        c,
+    );
     let params = RibbonParams {
         stripes: 3,
         stripe_inset: 0.12,
@@ -425,26 +453,19 @@ fn volute(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     };
     let style = RibbonStyle::from_palette(palette, rng.chance(0.5), rng.uniform(0.3, 0.6));
     let (band, ribbon) = sh.ribbon("volute", seed, coil.curve, &params, &style);
-    // The eye covers the blunt end of the band.
-    let eye_c = coil.spiral.center();
-    let r_end = coil.r0 * end_ratio;
-    let eye_r = r_end * (1.0 + c) * 1.06;
-    let wmax = (0..=64)
-        .map(|i| ribbon.half_width(i as f64 / 64.0))
-        .fold(0.0, f64::max);
-    let disc = Circle::new(eye_c, eye_r).to_path(sh.acc);
-    let ring = Circle::new(eye_c, 0.62 * eye_r).to_path(sh.acc);
-    let dot = Circle::new(eye_c, 0.2 * eye_r).to_path(sh.acc);
+    // A ball terminal on the blunt end of the band, lit from outside the coil.
+    let tip = ribbon.point(1.0, 0.0);
+    let r = 1.45 * ribbon.half_width(1.0);
+    let out = unit_or(tip - coil.spiral.center(), Vec2::new(1.0, 0.0));
+    let ball = Circle::new(tip, r).to_path(sh.acc);
+    let shine = Circle::new(tip + out * (0.3 * r), 0.45 * r).to_path(sh.acc);
     let mut root = Node::group(vec![band]);
+    root.push(Node::path(ball.clone(), Style::fill(style.shade)));
+    root.push(Node::path(shine, Style::fill(style.highlight)).clipped(ball.clone()));
     root.push(Node::path(
-        disc,
-        Style::fill_stroke(style.highlight, style.ink, style.outline_width * wmax),
+        ball,
+        Style::stroke(style.ink, 2.0 * style.outline_width * r),
     ));
-    root.push(Node::path(
-        ring,
-        Style::stroke(style.stripe, style.stripe_width * wmax),
-    ));
-    root.push(Node::path(dot, Style::fill(style.ink)));
     root
 }
 
@@ -493,13 +514,10 @@ fn whip_spiral(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         body.curvature(1.0) < 0.0,
         sh.acc,
     );
-    let base = WidthProfile::tapered(l * rng.uniform(0.026, 0.034), 0.3, 0.04, 1.3);
+    let base = WidthProfile::tapered(l * rng.uniform(0.046, 0.054), 0.3, 0.04, 1.3);
     let profile = coiled(base, &curve, coil_ratio(turns, end_ratio));
     let params = RibbonParams {
-        stripes: 1,
-        stripe_inset: 0.3,
-        centre_stripe: true,
-        hatch: false,
+        stripes: 2,
         ..RibbonParams::symmetric(profile)
     };
     let style = RibbonStyle::from_palette(palette, rng.chance(0.5), rng.uniform(0.1, 0.4));
@@ -585,7 +603,7 @@ fn spiral_with_leaves(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Nod
     let u_max = ((b.coil.lead_len + 0.45 * first_turn) / length).min(0.6);
     let outer = if p.clockwise { 1.0 } else { -1.0 };
     let count = if rng.chance(0.5) { 2 } else { 3 };
-    let leaf_style = RibbonStyle::from_palette(palette, !warm, rng.uniform(0.3, 0.55));
+    let leaf_style = LeafStyle::from_palette(palette, !warm, rng.uniform(0.3, 0.55));
     let c = b.ribbon.centerline();
     let mut root = Node::empty();
     for i in 0..count {
@@ -607,13 +625,7 @@ fn spiral_with_leaves(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Nod
             len * rng.uniform(0.38, 0.48),
             LeafParams::new(shape).with_tip_curl(-outer * rng.uniform(0.15, 0.35)),
         );
-        root.push(sh.leaf(
-            "spiral-leaf",
-            &seed.index(i as u64),
-            leaf,
-            &leaf_params(outer),
-            &leaf_style,
-        ));
+        root.push(sh.foliage("spiral-leaf", &seed.index(i as u64), leaf, &leaf_style));
     }
     root.push(b.node);
     root

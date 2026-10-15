@@ -619,22 +619,6 @@ impl Sheet {
         (node, ribbon)
     }
 
-    /// Fit, record and engrave a leaf.
-    pub(crate) fn leaf<C: Curve>(
-        &mut self,
-        label: &str,
-        seed: &SeedTree,
-        mut leaf: Leaf<C>,
-        params: &RibbonParams,
-        style: &RibbonStyle,
-    ) -> Node {
-        leaf.fit_width(self.acc);
-        if let Some(r) = &mut self.reports {
-            r.push((label.to_string(), leaf.check(self.acc)));
-        }
-        ribbon_layers(seed, &leaf, params, style, self.acc)
-    }
-
     /// Fit, record and draw a leaf in the engraved foliage style (two-tone blade, hatching,
     /// a vein per lobe, ink outline).
     pub(crate) fn foliage<C: Curve>(
@@ -677,20 +661,6 @@ pub(crate) fn build_all(
             (name.to_string(), fit_to_box(node, sheet.size))
         })
         .collect()
-}
-
-/// Leaf-like parameters for engraving a leaf with [`ribbon_layers`]: a midrib, one stripe
-/// per side and hatching, no highlight.
-pub(crate) fn leaf_params(lit_side: f64) -> RibbonParams {
-    RibbonParams {
-        stripes: 1,
-        centre_stripe: true,
-        stripe_inset: 0.35,
-        highlight: false,
-        hatch: true,
-        lit_side,
-        ..RibbonParams::symmetric(WidthProfile::zero())
-    }
 }
 
 /// Mirror a node horizontally with probability ½ (handedness variety).
