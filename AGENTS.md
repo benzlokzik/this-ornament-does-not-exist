@@ -27,7 +27,7 @@ Rust crate `orna`, managed via [Cargo.toml](Cargo.toml): a purely procedural, se
 ## Rust guidelines
 
 - Add Rust dependencies in [Cargo.toml](Cargo.toml), tool dependencies in [pixi.toml](pixi.toml). Commit [Cargo.lock](Cargo.lock) and [pixi.lock](pixi.lock). Do not add a dependency when the existing stack already covers the need
-- Respect the layer order: `geom` → `motif` → `ornament` → `compose` → `render`. A lower layer never imports a higher one
+- Respect the layer order: `geom` → `ornament` → `motif` → `compose` → `render` (ornament engraves `geom` surfaces, motifs use it). A lower layer never imports a higher one
 - Draw randomness only from a `SeedTree` child or index stream (`rng::SeedTree`, `rng::Draw`); never use `rand::rng()`, thread RNG, time, or `HashMap` iteration order in generation paths, and keep `rayon` work order-independent so output stays reproducible
 - Generators return scene `Node`s; only `render` touches `svg`/`resvg`. Keep geometry in `kurbo` types (`Point`, `Vec2`, `Affine`, `BezPath`)
 - Use `thiserror` enums for library errors and `anyhow` with `.context(...)` only in the binary and at layer boundaries. No `unwrap`/`expect` on user input, file I/O or config
