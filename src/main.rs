@@ -21,18 +21,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Render a demonstration gallery of ribbons, spirals, flowers and palettes.
+    /// Render a demonstration sheet of ribbons, spirals, flowers, foliage, plants and palettes.
     Gallery {
         #[arg(long, default_value_t = 42)]
         seed: u64,
         /// Output path; `.svg` or `.png` decides the format. A sibling file in the other
-        /// format is written too unless `--single` is given.
+        /// format is written too unless `--single` is given. Missing directories are created.
         #[arg(long, short, default_value = "gallery.svg")]
         output: PathBuf,
+        /// Sheet width; the number of tile columns follows from it.
         #[arg(long, default_value_t = 1600.0)]
         width: f64,
+        /// Minimum sheet height; the sheet grows taller when the tiles need it.
         #[arg(long, default_value_t = 2000.0)]
         height: f64,
+        /// Palette of the sheet (see `orna palettes`).
         #[arg(long, default_value = "botanica")]
         palette: String,
         /// PNG scale factor relative to the SVG size.
@@ -144,11 +147,15 @@ fn main() -> anyhow::Result<()> {
                 cfg.detail = detail;
             }
             cfg.validate()?;
-            let scene = orna::compose::generate(&cfg)?;
+            let scene = orna::compose::generate(&cfg).with_context(|| {
+                format!("generating the {:?} preset (seed {})", cfg.preset, cfg.seed)
+            })?;
             if save_config {
                 let p = output.with_extension("json");
-                std::fs::write(&p, serde_json::to_string_pretty(&cfg)?)?;
-                eprintln!("wrote {}", p.display());
+                create_parent(&p)?;
+                std::fs::write(&p, serde_json::to_string_pretty(&cfg)?)
+                    .with_context(|| format!("writing {}", p.display()))?;
+                println!("wrote {}", p.display());
             }
             write_outputs(&scene, &output, scale, single)
         }
@@ -175,26 +182,39 @@ fn join(cs: &[orna::scene::Color]) -> String {
         .join(",")
 }
 
-/// Write SVG and PNG (unless `single`), choosing by the extension of `output`.
+/// Write SVG and PNG (unless `single`), choosing by the extension of `output`, creating
+/// missing parent directories and printing each written path.
 fn write_outputs(scene: &Scene, output: &Path, scale: f64, single: bool) -> anyhow::Result<()> {
     let ext = output
         .extension()
         .and_then(|e| e.to_str())
-        .unwrap_or("svg")
-        .to_ascii_lowercase();
-    let (svg_path, png_path) = match ext.as_str() {
-        "png" => (output.with_extension("svg"), output.to_path_buf()),
-        _ => (output.to_path_buf(), output.with_extension("png")),
+        .map(str::to_ascii_lowercase);
+    let (svg_path, png_path) = match ext.as_deref() {
+        Some("svg") => (output.to_path_buf(), output.with_extension("png")),
+        Some("png") => (output.with_extension("svg"), output.to_path_buf()),
+        _ => anyhow::bail!("output {} must end in .svg or .png", output.display()),
     };
-    if !single || ext != "png" {
+    let want_png = ext.as_deref() == Some("png");
+    create_parent(output)?;
+    if !single || !want_png {
         render::write_svg(scene, &svg_path)
             .with_context(|| format!("writing {}", svg_path.display()))?;
-        eprintln!("wrote {}", svg_path.display());
+        println!("wrote {}", svg_path.display());
     }
-    if !single || ext == "png" {
+    if !single || want_png {
         render::write_png(scene, &png_path, scale)
             .with_context(|| format!("writing {}", png_path.display()))?;
-        eprintln!("wrote {}", png_path.display());
+        println!("wrote {}", png_path.display());
+    }
+    Ok(())
+}
+
+/// Create the parent directory of `path` if it is missing.
+fn create_parent(path: &Path) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     Ok(())
 }
