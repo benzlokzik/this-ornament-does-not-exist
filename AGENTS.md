@@ -44,7 +44,7 @@ Rust crate `orna`, managed via [Cargo.toml](Cargo.toml): a purely procedural, se
 
 ## Commits
 
-- Commit regularly: one Conventional Commit per finished, compiling step (a module, a fix, a doc change). Don't batch a whole milestone into one commit
+- Commit regularly, at module granularity: one Conventional Commit per finished, compiling module or feature, with its review fixes folded in. Don't batch a whole milestone into one commit, and don't split one module into a trail of micro-commits
 - Format `type(scope): summary`; allowed types are `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`. The scope is optional but encouraged (e.g. `feat(motif): ...`)
 - The summary is a single short sentence in imperative mood, 69 characters maximum, without a trailing period; the commit-msg hook rejects anything else
 - No commit body and no bullet lists. Keep rationale and design notes in the linked GitHub issue or the module docs, not in the commit message
