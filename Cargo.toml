@@ -30,6 +30,10 @@ rayon = "1.12"
 [profile.release]
 opt-level = 3
 
-# Optimise dependencies (resvg, kurbo) even in debug builds so tests stay fast.
+# Light optimisation in debug builds: the geometry tests are numerically heavy, and
+# unoptimised runs take a minute. Dependencies (resvg, kurbo) get full optimisation.
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 2
