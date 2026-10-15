@@ -134,6 +134,10 @@ pub fn build(opts: &GalleryOptions) -> anyhow::Result<Scene> {
             spiral::variants(&seed.child("spirals"), &pal, size, accuracy),
         ),
         (
+            "scrolls",
+            crate::motif::scroll::variants(&seed.child("scrolls"), &pal, size, accuracy),
+        ),
+        (
             "flowers",
             flowers(&seed.child("flowers"), &pal, size, accuracy),
         ),

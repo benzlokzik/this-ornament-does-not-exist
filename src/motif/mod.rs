@@ -6,4 +6,5 @@ pub mod flower;
 pub mod foliage;
 pub mod plant;
 pub mod ribbon;
+pub mod scroll;
 pub mod spiral;
