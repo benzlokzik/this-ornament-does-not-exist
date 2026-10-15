@@ -1,12 +1,16 @@
 //! Ribbon motifs: tapered Art Nouveau ribbons engraved in layers.
 //!
 //! [`ribbon_motif`] turns a centreline and a pair of width profiles into a finished
-//! [`Node`] engraved in nested tonal bands: a mid-tone fill, a dark band along each edge, a
-//! light core on the lit (convex) side, hatch lines running along the ribbon on the shaded
-//! side, thin contour lines and an ink rim, all clipped by the outline, with a hairline
-//! outline on top. Bands and lines follow the ribbon's own `(u, v)` parameterisation with a
-//! thickness proportional to the local width, so they taper into tips and spiral eyes and
-//! a motif reads the same at any scale.
+//! [`Node`] shaded as a flat, folded strip in the manner of engraved Art Nouveau borders:
+//! a mid-tone fill; a shadow band hugging the shaded edge, darkest at the edge and fading
+//! inwards, hatched along the ribbon; a highlight set off-centre towards the lit edge with
+//! a soft inner border; a lit edge slightly lighter than the body; thin contour lines and
+//! an ink rim, all clipped by the outline, with a hairline outline on top. Where the
+//! ribbon bends the other way the shadow and the highlight swap sides smoothly; at a fold
+//! (see [`fold_sites`]) the ribbon pinches, shows its dark back side and swaps them at
+//! once. Bands and lines follow the ribbon's own `(u, v)` parameterisation with a thickness
+//! proportional to the local width, so they taper into tips and spiral eyes and a motif
+//! reads the same at any scale.
 //!
 //! Where a ribbon rolls into a spiral, its width is capped by a fraction of the local
 //! radius of curvature (see [`coiled`]): the width then shrinks with the radius, the turns
@@ -98,31 +102,37 @@ pub struct RibbonParams {
     pub left: WidthProfile,
     /// Half-width profile of the right side.
     pub right: WidthProfile,
-    /// Contour lines per side, running inside the tonal bands (0 = none).
+    /// Contour lines: `0` = none, `1` = the inner border of the shadow band, `2` (or more)
+    /// = also a fine line along the lit edge.
     pub stripes: usize,
     /// Also draw the centre line (`v = 0`) as a contour line, like a midrib.
     pub centre_stripe: bool,
-    /// Spacing of the contour lines as a fraction of the half-width.
+    /// Spacing of the contour lines as a fraction of the half-width (kept for
+    /// compatibility; the lines follow the tonal bands).
     pub stripe_inset: f64,
-    /// Draw the light core band on the lit side.
+    /// Draw the highlight band near the lit edge.
     pub highlight: bool,
-    /// Hatch the shaded side.
+    /// Hatch the shadow band.
     pub hatch: bool,
     /// Lit side where the centreline runs straight: `+1` = left (`v > 0`), `-1` = right.
-    /// Where it bends, the convex side is lit, so the light flips across an S-curve.
+    /// Where it bends, the convex side is lit, so the light swaps sides across an S-curve.
     pub lit_side: f64,
     /// Lean of width bumps towards the end, see [`Ribbon::with_lean`].
     pub lean: f64,
-    /// Dark edge band as a fraction of the half-width (`0` = none; clamped to `[0, 0.6]`).
+    /// Depth of the shadow band from the shaded edge, as a fraction of the half-width
+    /// (`0` = none; clamped to `[0, 0.6]`).
     pub edge_band: f64,
     /// Swallowtail notch cut into both ends, as a multiple of the end's half-width
     /// (`0` = the ribbon's own caps; only open ends are notched).
     pub notch: f64,
+    /// Folds, as `(start, end)` arc-length fractions of the back side shown between two
+    /// width pinches (empty = none). [`fold_sites`] places them at the ribbon's turns.
+    pub folds: Vec<(f64, f64)>,
 }
 
 impl RibbonParams {
-    /// Two contour lines per side, tonal bands, highlight and hatching on, lit on the left
-    /// where straight, no notch.
+    /// Both contour lines, shadow band, highlight and hatching on, lit on the left where
+    /// straight, no notch, no fold.
     pub fn new(left: WidthProfile, right: WidthProfile) -> RibbonParams {
         RibbonParams {
             left,
@@ -134,8 +144,9 @@ impl RibbonParams {
             hatch: true,
             lit_side: 1.0,
             lean: 0.0,
-            edge_band: 0.24,
+            edge_band: 0.45,
             notch: 0.0,
+            folds: Vec::new(),
         }
     }
 
@@ -145,10 +156,20 @@ impl RibbonParams {
     }
 }
 
-/// A ribbon around `centerline` with the profiles of `params`, narrowed by
-/// [`Ribbon::fit_width`] so that its outline at `accuracy` does not self-intersect.
+/// A ribbon around `centerline` with the profiles of `params`, pinched at both ends of
+/// every fold, narrowed by [`Ribbon::fit_width`] so that its outline at `accuracy` does not
+/// self-intersect.
 pub fn fitted_ribbon<C: Curve>(centerline: C, params: &RibbonParams, accuracy: f64) -> Ribbon<C> {
-    let mut ribbon = Ribbon::new(centerline, params.left.clone(), params.right.clone())
+    let folds = fold_spans(&params.folds);
+    let pinch = |p: &WidthProfile| {
+        if folds.is_empty() {
+            p.clone()
+        } else {
+            let f = folds.clone();
+            p.clone().map(move |u, w| w * fold_pinch(&f, u))
+        }
+    };
+    let mut ribbon = Ribbon::new(centerline, pinch(&params.left), pinch(&params.right))
         .with_lean(finite_or(params.lean, 0.0));
     ribbon.fit_width(sane_accuracy(accuracy));
     ribbon
@@ -169,56 +190,210 @@ pub fn ribbon_motif<C: Curve>(
 
 /// Samples of the per-`u` lighting of a surface.
 const TONE_SAMPLES: usize = 256;
+/// Curvature × widest half-width above which a bend counts as one: its convex side is lit
+/// (gentler stretches keep [`RibbonParams::lit_side`]).
+const BEND: f64 = 1.0 / 60.0;
+/// Box-blur radius (in [`TONE_SAMPLES`]) of the light's side: three passes spread a swap
+/// over about 15 % of the length.
+const SWAP_BLUR: usize = 10;
+/// Width at the pinches of a fold, relative to the unpinched width.
+const PINCH: f64 = 0.16;
+/// Width in the middle of a fold's back side, relative to the unpinched width.
+const BACK_WIDTH: f64 = 0.72;
 
-/// Where a surface is lit: `lit(u) ∈ [-1, 1]` (`+1` = the left side `v > 0` is lit) and
+/// Where a surface is lit: `side(u) ∈ [-1, 1]` (`+1` = the left side `v > 0` is lit) and
 /// the relative half-width `hw(u) / W`, both tabulated on a uniform `u` grid.
 struct Tone {
-    lit: Vec<f64>,
+    side: Vec<f64>,
     rel: Vec<f64>,
 }
 
 impl Tone {
-    /// The convex side of the centreline (`v = 0`) is lit, as on a bent, satin band; where
-    /// it runs straight `lit_side` decides. The curvature is measured relative to the
-    /// widest half-width `wmax` and smoothed, so the light swaps sides gradually across an
-    /// inflection.
-    fn new<S: Surface + ?Sized>(surface: &S, lit_side: f64, wmax: f64) -> Tone {
+    /// The convex side of every bend is lit, as on a flat strip catching the light; where
+    /// the centreline runs straight `lit_side` decides. The lit side is blurred along the
+    /// ribbon so it swaps gradually across an inflection, but not across a fold: there it
+    /// swaps inside the fold's hidden back side, at once.
+    fn new<S: Surface + ?Sized>(
+        surface: &S,
+        lit_side: f64,
+        wmax: f64,
+        folds: &[(f64, f64)],
+    ) -> Tone {
         let n = TONE_SAMPLES;
-        let pts: Vec<Point> = (0..=n)
-            .map(|i| surface.point(i as f64 / n as f64, 0.0))
+        let k = centre_curvature(|u| surface.point(u, 0.0), n);
+        let bias = if lit_side < 0.0 { -1.0 } else { 1.0 };
+        let target: Vec<f64> = k
+            .iter()
+            .map(|k| (3.0 * (bias - k * wmax / BEND)).tanh())
             .collect();
-        const H: usize = 3;
-        let mut k: Vec<f64> = (0..=n)
-            .map(|i| {
-                let (a, b, c) = (pts[i.saturating_sub(H)], pts[i], pts[(i + H).min(n)]);
-                let d = (b - a).hypot() * (c - b).hypot() * (c - a).hypot();
-                let m = 2.0 * (b - a).cross(c - a) / d;
-                if m.is_finite() { m } else { 0.0 }
-            })
+        // Blur each stretch between fold centres on its own.
+        let mut cuts: Vec<usize> = folds
+            .iter()
+            .map(|(a, b)| ((0.5 * (a + b) * n as f64).round() as usize).clamp(1, n - 1))
             .collect();
-        for _ in 0..3 {
-            k = box_blur(&k, 10);
+        cuts.dedup();
+        let mut side = Vec::with_capacity(n + 1);
+        let mut start = 0;
+        for end in cuts.into_iter().chain([n + 1]) {
+            let mut part = target[start..end].to_vec();
+            for _ in 0..3 {
+                part = box_blur(&part, SWAP_BLUR);
+            }
+            side.extend(part);
+            start = end;
         }
-        let bias = 0.5 * if lit_side < 0.0 { -1.0 } else { 1.0 };
-        let lit = k.iter().map(|k| (bias - 7.0 * k * wmax).tanh()).collect();
+        // Bridge each back side linearly so the table stays continuous.
+        for &(a, b) in folds {
+            let i0 = ((a * n as f64).floor() as usize).min(n);
+            let i1 = ((b * n as f64).ceil() as usize).min(n);
+            if i1 > i0 + 1 {
+                let (x0, x1) = (side[i0], side[i1]);
+                for (j, x) in side[i0..=i1].iter_mut().enumerate() {
+                    *x = lerp(x0, x1, j as f64 / (i1 - i0) as f64);
+                }
+            }
+        }
         let rel = (0..=n)
             .map(|i| half_width_at(surface, i as f64 / n as f64) / wmax)
             .collect();
-        Tone { lit, rel }
+        Tone { side, rel }
     }
 
-    fn lit(&self, u: f64) -> f64 {
-        sample_table(&self.lit, u)
+    /// Lit side at `u`, in `[-1, 1]`.
+    fn side(&self, u: f64) -> f64 {
+        sample_table(&self.side, u)
     }
 
     fn rel(&self, u: f64) -> f64 {
         sample_table(&self.rel, u)
     }
 
-    /// How deep side `side` (`±1`) lies in shadow at `u`, in `[0, 1]`.
+    /// How deep side `side` (`±1`) lies in shadow at `u`, in `[0, 1]`; the two sides
+    /// always add up to 1, so the bands never vanish together.
     fn shadow(&self, u: f64, side: f64) -> f64 {
-        0.5 * (1.0 - side * self.lit(u))
+        smoothstep(0.5 * (1.0 - side * self.side(u)))
     }
+}
+
+/// Signed curvature of a centreline `point(u)` at `n + 1` uniform `u` samples (Menger
+/// curvature over a 6-sample chord, box-blurred three times).
+fn centre_curvature(point: impl Fn(f64) -> Point, n: usize) -> Vec<f64> {
+    let pts: Vec<Point> = (0..=n).map(|i| point(i as f64 / n as f64)).collect();
+    const H: usize = 3;
+    let mut k: Vec<f64> = (0..=n)
+        .map(|i| {
+            let (a, b, c) = (pts[i.saturating_sub(H)], pts[i], pts[(i + H).min(n)]);
+            let d = (b - a).hypot() * (c - b).hypot() * (c - a).hypot();
+            let m = 2.0 * (b - a).cross(c - a) / d;
+            if m.is_finite() { m } else { 0.0 }
+        })
+        .collect();
+    for _ in 0..3 {
+        k = box_blur(&k, 10);
+    }
+    k
+}
+
+/// Valid folds: finite, ordered, inside `[0.02, 0.98]`, `0.004` to `0.3` long and not
+/// overlapping (a fold overlapping an earlier one is dropped).
+fn fold_spans(folds: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut spans: Vec<(f64, f64)> = folds
+        .iter()
+        .filter(|(a, b)| a.is_finite() && b.is_finite())
+        .map(|&(a, b)| (a.min(b).max(0.02), a.max(b).min(0.98)))
+        .filter(|(a, b)| (0.004..=0.3).contains(&(b - a)))
+        .collect();
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(spans.len());
+    for s in spans {
+        // Keep the pinch ramps (one span wide on each side) apart.
+        if out
+            .last()
+            .is_none_or(|l| s.0 - (s.1 - s.0) >= l.1 + (l.1 - l.0))
+        {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Profile of a fold's back side at `x ∈ [0, 1]` between its pinches: a wedge widening
+/// slowly from the first crease and closing quickly into the second.
+fn back_shape(x: f64) -> f64 {
+    (PI * x.clamp(0.0, 1.0).powf(1.9)).sin()
+}
+
+/// Width factor of the folds at `u`: the back side between the pinches is a narrower
+/// wedge, each pinch narrows to [`PINCH`] and widens back over 1.4 spans outside.
+fn fold_pinch(folds: &[(f64, f64)], u: f64) -> f64 {
+    folds
+        .iter()
+        .map(|&(a, b)| {
+            let (c, h) = (0.5 * (a + b), 0.5 * (b - a));
+            let d = (u - c).abs() / h.max(EPS);
+            if d < 1.0 {
+                lerp(PINCH, BACK_WIDTH, back_shape((u - a) / (b - a)))
+            } else {
+                lerp(PINCH, 1.0, smoothstep((d - 1.0) / 1.4))
+            }
+        })
+        .product()
+}
+
+/// Up to `max` folds for a ribbon of `profile` along `centerline`, as
+/// [`RibbonParams::folds`]: at the inflections between two real bends (where the light
+/// swaps sides anyway), away from the ends, the back side about one ribbon width long.
+/// Short or stubby ribbons (shorter than 9 widest half-widths) get none.
+pub fn fold_sites<C: Curve + ?Sized>(
+    centerline: &C,
+    profile: &WidthProfile,
+    max: usize,
+) -> Vec<(f64, f64)> {
+    let n = TONE_SAMPLES;
+    let wmax = profile.max_sampled(n + 1);
+    let al = centerline.arc_length(4 * n);
+    let len = al.total();
+    if max == 0 || !(wmax.is_finite() && wmax > EPS && len.is_finite()) || len < 9.0 * wmax {
+        return Vec::new();
+    }
+    let k = centre_curvature(|u| centerline.point(al.t_at_fraction(u)), n);
+    let bend = |i0: usize, i1: usize| {
+        k[i0.min(n)..=i1.min(n)]
+            .iter()
+            .map(|k| k * wmax)
+            .fold((0.0_f64, 0.0_f64), |(lo, hi), x| (lo.min(x), hi.max(x)))
+    };
+    let reach = n * 15 / 100;
+    // Candidates: sign changes with a bend of each sign within reach, scored by the
+    // weaker of the two bends.
+    let mut cand: Vec<(f64, usize)> = (n / 5..=n - n / 5)
+        .filter(|&i| k[i - 1].signum() != k[i].signum())
+        .filter_map(|i| {
+            let (lo_b, hi_b) = bend(i - reach, i);
+            let (lo_a, hi_a) = bend(i, i + reach);
+            let before = if k[i - 1] > 0.0 { hi_b } else { -lo_b };
+            let after = if k[i] > 0.0 { hi_a } else { -lo_a };
+            let score = before.min(after);
+            (score > 2.0 * BEND).then_some((score, i))
+        })
+        .collect();
+    cand.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut sites: Vec<(f64, f64)> = Vec::new();
+    for (_, i) in cand {
+        let u = i as f64 / n as f64;
+        let h = 0.8 * profile.eval(u).max(0.25 * wmax) / len;
+        let span = (u - h, u + h);
+        if sites
+            .iter()
+            .all(|s| (0.5 * (s.0 + s.1) - u).abs() > 6.0 * h.max(0.5 * (s.1 - s.0)))
+        {
+            sites.push(span);
+        }
+        if sites.len() >= max {
+            break;
+        }
+    }
+    fold_spans(&sites)
 }
 
 /// Half-width at `u` with non-finite values mapped to `0`.
@@ -267,10 +442,12 @@ fn centre_length<S: Surface + ?Sized>(surface: &S, n: usize) -> f64 {
 }
 
 /// The engraved layers of any surface (a [`Ribbon`], a leaf, a sub-band), bottom to top:
-/// the mid-tone fill; then, clipped by the outline, a dark tonal band along each edge
-/// (wider on the shaded side), a two-step light core on the lit side, hatch lines running
-/// along the surface on the shaded side, thin contour lines and an ink rim; then a hairline
-/// outline. The convex side of every bend is lit (see [`RibbonParams::lit_side`]).
+/// the mid-tone fill; then, clipped by the outline, a shadow band along the shaded edge
+/// (three nested steps, darkest at the edge), a lit edge a little lighter than the body, a
+/// highlight off-centre towards the lit edge with a soft inner border, hatch lines inside
+/// the shadow band, contour lines, the dark back side of each fold and an ink rim; then a
+/// hairline outline. The convex side of every bend is lit (see
+/// [`RibbonParams::lit_side`]), so shadow and highlight swap sides across an S-curve.
 ///
 /// Every band and line lives in the surface's `(u, v)` space with a thickness proportional
 /// to the local half-width, so it tapers into tips and spiral eyes instead of piling up,
@@ -296,82 +473,152 @@ pub fn ribbon_layers<S: Surface + ?Sized>(
     let frac = |k: f64| finite_or(k, 0.0).max(0.0);
     root.push(Node::path(outline.clone(), Style::fill(style.fill)));
 
-    let tone = Tone::new(surface, params.lit_side, wmax);
+    let folds = fold_spans(&params.folds);
+    let tone = Tone::new(surface, params.lit_side, wmax, &folds);
     let mut details = Node::empty();
-    let strip =
-        |lo: &dyn Fn(f64) -> f64, hi: &dyn Fn(f64) -> f64| band(surface, 0.0, 1.0, lo, hi, acc);
+    // A strip around `v = centre(u)`, `half(u)` wide each way, split where it vanishes.
+    let strips = |centre: &dyn Fn(f64) -> f64, half: &dyn Fn(f64) -> f64| {
+        line_strips(surface, centre, half, acc)
+    };
+    // Fades a line out where the surface is narrower than `need` of its widest width.
+    let wide = |u: f64, need: f64| smoothstep((tone.rel(u) - need) / 0.08);
 
-    // Dark edge bands, a third wider on the shaded side.
-    let edge = finite_or(params.edge_band, 0.0).clamp(0.0, 0.6);
-    let edge_at = |u: f64, side: f64| edge * (1.0 + 0.35 * (2.0 * tone.shadow(u, side) - 1.0));
-    if edge > 0.0 {
-        let bands = vec![
-            strip(&|u| 1.0 - edge_at(u, 1.0), &|_| 1.0),
-            strip(&|_| -1.0, &|u| edge_at(u, -1.0) - 1.0),
-        ];
-        push_merged(&mut details, bands, Style::fill(style.shade), acc);
-    }
-
-    // Light core: a soft band and a brighter centre, shifted towards the lit side.
-    if params.highlight {
-        let c = |u: f64| 0.28 * tone.lit(u);
-        for (h, alpha) in [(0.32, 0.6), (0.13, 1.0)] {
-            let p = strip(&|u| c(u) - h, &|u| c(u) + h);
+    // Shadow band: three nested steps from the shaded edge inwards, each a fraction of the
+    // full depth, so the tone is darkest at the edge. Its depth follows the shadow, so the
+    // band slides over to the other edge where the light swaps sides.
+    let depth = finite_or(params.edge_band, 0.0).clamp(0.0, 0.6);
+    let shade_depth = |u: f64, side: f64| depth * tone.shadow(u, side);
+    if depth > 0.0 {
+        for (f, alpha) in [(1.0, 0.42), (0.62, 0.5), (0.3, 0.6)] {
+            let mut bands = Vec::new();
+            for side in [1.0, -1.0] {
+                let half = move |u: f64| 0.5 * f * shade_depth(u, side);
+                bands.extend(strips(&|u| side * (1.0 - half(u)), &half));
+            }
             push_merged(
                 &mut details,
-                vec![p],
+                bands,
+                Style::fill(style.shade).with_opacity(alpha),
+                acc,
+            );
+        }
+    }
+
+    // Lit edge: a narrow band a little lighter than the body, no dark band.
+    let lit_edge = |u: f64, side: f64| 0.2 * (1.0 - tone.shadow(u, side));
+    {
+        let mut bands = Vec::new();
+        for side in [1.0, -1.0] {
+            let half = move |u: f64| 0.5 * lit_edge(u, side);
+            bands.extend(strips(&|u| side * (1.0 - half(u)), &half));
+        }
+        push_merged(
+            &mut details,
+            bands,
+            Style::fill(style.fill.mix(style.highlight, 0.3)),
+            acc,
+        );
+    }
+
+    // Highlight: centred about halfway to the lit edge, crisp on its outer border and soft
+    // on its inner one (nested steps that reach further inwards at lower opacity).
+    if params.highlight {
+        let c = |u: f64| 0.47 * tone.side(u);
+        for (h, inner, alpha) in [(0.22, 0.12, 0.35), (0.22, 0.0, 0.45), (0.18, -0.08, 0.7)] {
+            let lo = |u: f64| c(u) - h - inner * tone.side(u).max(0.0);
+            let hi = |u: f64| c(u) + h + inner * (-tone.side(u)).max(0.0);
+            push_merged(
+                &mut details,
+                vec![band(surface, 0.0, 1.0, lo, hi, acc)],
                 Style::fill(style.highlight).with_opacity(alpha),
                 acc,
             );
         }
     }
 
-    // Hatching: lines along the surface, from the shaded edge inwards; each reaches only
-    // where the shadow is deep enough for it, the inner ones less far, and inner lines
-    // drop out where the ribbon narrows. Line ends taper to points.
+    // Hatching: lines along the ribbon inside the shadow band, at fixed fractions of its
+    // depth; the inner ones need a deeper shadow, so they drop out first where the band
+    // thins, and all drop out where the ribbon narrows. Line ends taper to points.
     let hatch_t = frac(style.hatch_width);
-    if params.hatch && hatch_t > 0.0 {
+    if params.hatch && hatch_t > 0.0 && depth > 0.0 {
         let mut rng = seed.rng_for("hatch");
-        let count = 6;
-        let step = 0.085;
         let mut lines = Vec::new();
         for side in [1.0, -1.0] {
-            for k in 0..count {
-                let v = move |u: f64| side * (0.96 - edge_at(u, side) - step * k as f64);
-                let thr = 0.42 + 0.06 * k as f64 + rng.uniform(-0.05, 0.05);
+            for k in 0..4 {
+                let f = 0.22 + 0.19 * k as f64;
+                let thr = 0.3 + 0.12 * k as f64 + rng.uniform(-0.04, 0.04);
                 let need = 0.1 + 0.05 * k as f64;
+                let v = move |u: f64| side * (1.0 - f * shade_depth(u, side));
                 let half = |u: f64| {
-                    let s = smoothstep((tone.shadow(u, side) - thr) / 0.12);
-                    let w = smoothstep((tone.rel(u) - need) / 0.08);
-                    0.5 * hatch_t * s * w
+                    let s = smoothstep((tone.shadow(u, side) - thr) / 0.15);
+                    0.5 * hatch_t * s * wide(u, need)
                 };
-                lines.extend(line_strips(surface, v, half, acc));
+                lines.extend(strips(&v, &half));
             }
         }
         let ink = style.stripe.mix(style.shade, 0.35);
         push_merged(&mut details, lines, Style::fill(ink), acc);
     }
 
-    // Contour lines: the inner border of each edge band, then `stripes − 1` more inwards.
+    // Contour lines: the inner border of the shadow band, then a fine line along the lit
+    // edge band; each fades out with its band.
     let stripe_t = frac(style.stripe_width);
     if stripe_t > 0.0 {
         let mut lines = Vec::new();
-        let gap = finite_or(params.stripe_inset, 0.14).clamp(0.04, 0.4);
         for side in [1.0, -1.0] {
-            for k in 0..params.stripes.min(8) {
-                let need = 0.12 * k as f64;
-                let v = |u: f64| {
-                    let e = if edge > 0.0 { edge_at(u, side) } else { gap };
-                    side * (1.0 - e - gap * k as f64)
+            if params.stripes >= 1 && depth > 0.0 {
+                let v = move |u: f64| side * (1.0 - shade_depth(u, side));
+                let half = |u: f64| {
+                    0.5 * stripe_t * smoothstep((tone.shadow(u, side) - 0.2) / 0.3) * wide(u, 0.0)
                 };
-                let half = |u: f64| 0.5 * stripe_t * smoothstep((tone.rel(u) - need) / 0.08);
-                lines.extend(line_strips(surface, v, half, acc));
+                lines.extend(strips(&v, &half));
+            }
+            if params.stripes >= 2 {
+                let v = move |u: f64| side * (1.0 - lit_edge(u, side));
+                let half = |u: f64| {
+                    let lit = 1.0 - tone.shadow(u, side);
+                    0.35 * stripe_t * smoothstep((lit - 0.4) / 0.3) * wide(u, 0.12)
+                };
+                lines.extend(strips(&v, &half));
             }
         }
         if params.centre_stripe {
-            lines.extend(line_strips(surface, |_| 0.0, |_| 0.5 * stripe_t, acc));
+            lines.extend(strips(&|_| 0.0, &|_| 0.5 * stripe_t));
         }
         push_merged(&mut details, lines, Style::fill(style.stripe), acc);
+    }
+
+    // Folds: the back side between the pinches in a darker tone, hiding the bands' swap,
+    // with two light lines converging into the pinches.
+    if !folds.is_empty() {
+        let back = style.shade.mix(style.ink, 0.3);
+        let covers = folds
+            .iter()
+            .map(|&(a, b)| band(surface, a, b, |_| -1.0, |_| 1.0, acc))
+            .collect();
+        push_merged(&mut details, covers, Style::fill(back), acc);
+        let mut lines = Vec::new();
+        for &(a, b) in &folds {
+            let bump = move |u: f64| {
+                let x = (u - a) / (b - a);
+                if (0.0..=1.0).contains(&x) {
+                    back_shape(x)
+                } else {
+                    0.0
+                }
+            };
+            let lit = tone.side(b).signum();
+            for (v, t) in [(0.45, 0.9), (0.12, 0.6)] {
+                let half = move |u: f64| 0.5 * t * stripe_t.max(0.02) * bump(u);
+                lines.extend(strips(&move |_| lit * v, &half));
+            }
+        }
+        push_merged(
+            &mut details,
+            lines,
+            Style::fill(style.highlight).with_opacity(0.55),
+            acc,
+        );
     }
 
     // Ink rim: the visible outline, as thick as a fixed fraction of the local width.
@@ -379,8 +626,8 @@ pub fn ribbon_layers<S: Surface + ?Sized>(
     if hair > 0.0 {
         let r = 2.2 * hair;
         let rims = vec![
-            strip(&|_| 1.0 - r, &|_| 1.0),
-            strip(&|_| -1.0, &|_| r - 1.0),
+            band(surface, 0.0, 1.0, |_| 1.0 - r, |_| 1.0, acc),
+            band(surface, 0.0, 1.0, |_| -1.0, |_| r - 1.0, acc),
         ];
         push_merged(&mut details, rims, Style::fill(style.ink), acc);
     }
@@ -753,7 +1000,7 @@ fn whiplash_ribbon(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
 }
 
 /// Wide wavy banner swelling towards the middle like cloth, both ends cut into a
-/// swallowtail notch.
+/// swallowtail notch, folded over at its strongest turn.
 fn banner(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let l = sh.size;
@@ -776,6 +1023,7 @@ fn banner(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
         stripes: 2,
         notch: rng.uniform(2.0, 2.6),
         lit_side: coin(&mut rng),
+        folds: fold_sites(&curve, &profile, 1),
         ..RibbonParams::symmetric(profile)
     };
     sh.ribbon("banner", seed, curve, &params, &style).0
@@ -870,7 +1118,8 @@ fn twist(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     root
 }
 
-/// A broad ribbon that sweeps through an S and rolls into a log-spiral tail.
+/// A broad ribbon that sweeps through an S, folded at its turn, and rolls into a log-spiral
+/// tail.
 fn scroll(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let l = sh.size;
@@ -891,7 +1140,8 @@ fn scroll(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let style = RibbonStyle::from_palette(palette, rng.chance(0.6), rng.uniform(0.15, 0.5));
     let params = RibbonParams {
         stripes: 2,
-        lit_side: if cw { -1.0 } else { 1.0 },
+        lit_side: if cw { 1.0 } else { -1.0 },
+        folds: fold_sites(&curve, &profile, 1),
         ..RibbonParams::symmetric(profile)
     };
     let node = sh.ribbon("scroll", seed, curve, &params, &style).0;
@@ -1127,6 +1377,91 @@ pub(crate) mod tests {
             0.05,
         );
         assert_eq!(empty.path_count(), 0);
+    }
+
+    /// Bounding box of the first detail layer (the outermost shadow step) of a motif.
+    fn shadow_box(node: &Node) -> kurbo::Rect {
+        let Node::Group { children, .. } = node else {
+            panic!("not a group")
+        };
+        let Node::Group { children: d, .. } = &children[1] else {
+            panic!("details")
+        };
+        d[0].bounding_box().expect("shadow")
+    }
+
+    #[test]
+    fn shading_is_asymmetric_and_follows_the_lit_side() {
+        let line = CubicBez::new((0.0, 0.0), (60.0, 0.0), (140.0, 0.0), (200.0, 0.0));
+        let style = RibbonStyle::from_palette(&palette(), true, 0.4);
+        let seed = SeedTree::new(5);
+        for lit in [1.0, -1.0] {
+            let params = RibbonParams {
+                lit_side: lit,
+                ..RibbonParams::symmetric(WidthProfile::constant(10.0))
+            };
+            let bb = shadow_box(&ribbon_motif(&seed, &line, &params, &style, 0.05));
+            // the left normal of +x is +y: the shadow hugs the unlit edge only
+            if lit > 0.0 {
+                assert!(bb.y1 < -4.0 && bb.y0 > -10.5, "{bb:?}");
+            } else {
+                assert!(bb.y0 > 4.0 && bb.y1 < 10.5, "{bb:?}");
+            }
+        }
+        // across an S the shadow swaps sides, so it reaches both edges
+        let s = CubicBez::new((0.0, 0.0), (60.0, -80.0), (140.0, 80.0), (200.0, 0.0));
+        let params = RibbonParams::symmetric(WidthProfile::constant(6.0));
+        let node = ribbon_motif(&seed, &s, &params, &style, 0.05);
+        let Node::Group { children, .. } = &node else {
+            panic!("not a group")
+        };
+        let Node::Group { children: d, .. } = &children[1] else {
+            panic!("details")
+        };
+        let Node::Path { path, .. } = &d[0] else {
+            panic!("shadow path")
+        };
+        let ribbon = fitted_ribbon(s, &params, 0.05);
+        let near = |v: f64| {
+            (5..=95).any(|i| {
+                let p = ribbon.point(i as f64 / 100.0, v);
+                path.contains(p)
+            })
+        };
+        assert!(near(0.97) && near(-0.97));
+    }
+
+    #[test]
+    fn folds_sit_at_turns_pinch_the_width_and_stay_valid() {
+        let s = CubicBez::new((0.0, 0.0), (60.0, -80.0), (140.0, 80.0), (200.0, 0.0));
+        let profile = WidthProfile::constant(8.0);
+        let folds = fold_sites(&s, &profile, 2);
+        assert_eq!(folds.len(), 1, "{folds:?}");
+        let (a, b) = folds[0];
+        assert!((0.5 * (a + b) - 0.5).abs() < 0.08 && b > a, "{folds:?}");
+        assert!(fold_sites(&s, &WidthProfile::constant(30.0), 1).is_empty());
+        assert!(fold_sites(&s, &profile, 0).is_empty());
+        let params = RibbonParams {
+            folds: folds.clone(),
+            ..RibbonParams::symmetric(profile)
+        };
+        let ribbon = fitted_ribbon(s, &params, 0.05);
+        assert!(ribbon.check(0.05).is_valid());
+        let w = |u: f64| ribbon.half_width(u);
+        assert!(w(a) < 0.25 * w(0.15) && w(b) < 0.25 * w(0.85));
+        assert!(w(0.5 * (a + b)) > 2.0 * w(a));
+        let style = RibbonStyle::from_palette(&palette(), false, 0.3);
+        let seed = SeedTree::new(9);
+        let node = ribbon_motif(&seed, &s, &params, &style, 0.05);
+        assert!(node.is_finite() && node.path_count() > 0);
+        assert_eq!(node, ribbon_motif(&seed, &s, &params, &style, 0.05));
+        // garbage folds are ignored instead of breaking the ribbon
+        let bad = RibbonParams {
+            folds: vec![(f64::NAN, 0.5), (0.7, 0.7), (-1.0, 3.0)],
+            ..params
+        };
+        let node = ribbon_motif(&seed, &s, &bad, &style, 0.05);
+        assert!(node.is_finite() && node.path_count() > 0);
     }
 
     #[test]

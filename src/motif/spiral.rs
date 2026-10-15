@@ -213,7 +213,7 @@ fn spiral_ribbon_in(
     let profile = coiled(body, &coil.curve, c);
     let params = RibbonParams {
         stripes: p.stripes,
-        lit_side: if p.clockwise { -1.0 } else { 1.0 },
+        lit_side: if p.clockwise { 1.0 } else { -1.0 },
         ..RibbonParams::symmetric(profile)
     };
     let (node, ribbon) = sh.ribbon("spiral-ribbon", seed, coil.curve.clone(), &params, style);
@@ -301,7 +301,7 @@ fn crozier_in(
     );
     let params = RibbonParams {
         stripes: 1,
-        lit_side: if clockwise { -1.0 } else { 1.0 },
+        lit_side: if clockwise { 1.0 } else { -1.0 },
         ..RibbonParams::symmetric(profile)
     };
     let end = end_of(&coil.curve);
@@ -417,8 +417,9 @@ fn crozier_variant(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     crozier_in(sh, seed, start, dir, 2.0 * sh.size, cw, &style).0
 }
 
-/// An Ionic volute: a broad band with three contour lines per side that rolls into nearly
-/// three turns around an open eye; its bands run on into the eye and end in a ball.
+/// An Ionic volute: a broad band that rolls into nearly three turns around an open eye; its
+/// shadow (inside the coil) and highlight (outside) run on into the eye and end in a ball
+/// lit from outside.
 fn volute(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let mut rng = seed.rng_for("shape");
     let turns = rng.uniform(2.6, 3.0);
@@ -448,7 +449,7 @@ fn volute(seed: &SeedTree, palette: &Palette, sh: &mut Sheet) -> Node {
     let params = RibbonParams {
         stripes: 3,
         stripe_inset: 0.12,
-        lit_side: if p.clockwise { -1.0 } else { 1.0 },
+        lit_side: if p.clockwise { 1.0 } else { -1.0 },
         ..RibbonParams::symmetric(profile)
     };
     let style = RibbonStyle::from_palette(palette, rng.chance(0.5), rng.uniform(0.3, 0.6));
