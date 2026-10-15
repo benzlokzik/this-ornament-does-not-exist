@@ -66,12 +66,13 @@ pub fn join_closed(a: &BezPath, b: &BezPath) -> BezPath {
     let mut out = BezPath::new();
     let mut first = true;
     for el in a.elements().iter().chain(b.elements().iter()) {
+        let last: Option<Point> = out.elements().last().and_then(|e| e.end_point());
         match el {
             kurbo::PathEl::MoveTo(p) => {
                 if first {
                     out.move_to(*p);
                     first = false;
-                } else {
+                } else if last.is_none_or(|l| (l - *p).hypot() > 1e-9) {
                     out.line_to(*p);
                 }
             }

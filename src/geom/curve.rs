@@ -104,14 +104,18 @@ pub trait CurveExt: Curve {
     }
 
     /// Fit a cubic Bézier path to this curve with the given accuracy (canvas units).
+    ///
+    /// Uses the crate's Schneider fitter ([`super::fit::fit_curve`]): forward handles of
+    /// positive length and G1 joins, so tangents and normals of the result stay usable.
+    /// (kurbo's `fit_to_bezpath` is kept behind [`FitAdapter`] for callers that want it,
+    /// but it can emit zero-length or reversed handles on smooth input.)
     fn to_bezpath(&self, accuracy: f64) -> BezPath {
-        let adapter = FitAdapter { curve: self };
         let acc = if accuracy.is_finite() && accuracy > 0.0 {
             accuracy
         } else {
             0.1
         };
-        let mut path = kurbo::fit_to_bezpath(&adapter, acc);
+        let mut path = super::fit::fit_curve(self, acc);
         if path.elements().is_empty() {
             // Degenerate (e.g. zero-length) curve: emit a tiny line so downstream stays well formed.
             path.move_to(self.point(0.0));
@@ -317,6 +321,7 @@ impl Composite {
     /// Locate segment index and local parameter for global `t`.
     pub fn locate(&self, t: f64) -> (usize, f64) {
         let n = self.segs.len();
+        let t = if t.is_nan() { 0.0 } else { t };
         if t <= 0.0 {
             let w = self.breaks[1] - self.breaks[0];
             return (0, t / w);
@@ -326,7 +331,7 @@ impl Composite {
             return (n - 1, 1.0 + (t - 1.0) / w);
         }
         // binary search on breaks
-        let i = match self.breaks.binary_search_by(|b| b.partial_cmp(&t).unwrap()) {
+        let i = match self.breaks.binary_search_by(|b| b.total_cmp(&t)) {
             Ok(i) => i.min(n - 1),
             Err(i) => i - 1,
         };
@@ -466,7 +471,7 @@ impl ArcLength {
 
     /// Arc length at parameter `t`.
     pub fn s_at(&self, t: f64) -> f64 {
-        let t = t.clamp(0.0, 1.0);
+        let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
         let n = self.ts.len() - 1;
         let x = t * n as f64;
         let i = (x.floor() as usize).min(n.saturating_sub(1));
@@ -477,11 +482,11 @@ impl ArcLength {
     /// Parameter `t` at arc length `s`.
     pub fn t_at(&self, s: f64) -> f64 {
         let total = self.total();
-        if total <= EPS {
-            return s.clamp(0.0, 1.0);
+        if total.is_nan() || total <= EPS || s.is_nan() {
+            return if s.is_nan() { 0.0 } else { s.clamp(0.0, 1.0) };
         }
         let s = s.clamp(0.0, total);
-        let i = match self.ss.binary_search_by(|v| v.partial_cmp(&s).unwrap()) {
+        let i = match self.ss.binary_search_by(|v| v.total_cmp(&s)) {
             Ok(i) => return self.ts[i],
             Err(i) => i.clamp(1, self.ss.len() - 1),
         };
@@ -626,6 +631,23 @@ mod tests {
         let al = c.arc_length(10);
         assert_eq!(al.total(), 0.0);
         assert!(al.t_at_fraction(0.5).is_finite());
+    }
+
+    #[test]
+    fn nan_parameters_do_not_panic() {
+        let c = Composite::through_points(
+            &[
+                Point::new(0.0, 0.0),
+                Point::new(10.0, 5.0),
+                Point::new(20.0, 0.0),
+            ],
+            0.5,
+        )
+        .unwrap();
+        assert!(c.point(f64::NAN).is_finite());
+        let al = c.arc_length(16);
+        assert!(al.t_at(f64::NAN).is_finite() && al.s_at(f64::NAN).is_finite());
+        assert!(al.t_at_fraction(f64::NAN).is_finite());
     }
 
     #[test]
