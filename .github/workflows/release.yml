@@ -18,8 +18,27 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  gate:
+    name: Tests and SAST passed on the tagged commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: check the workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" -q .sha)
+          echo "$TAG points at $sha"
+          for wf in tests.yml sast.yml; do
+            n=$(gh run list -R "$GITHUB_REPOSITORY" --commit "$sha" --workflow "$wf" --status success --json databaseId --jq length)
+            [ "$n" -gt 0 ] || { echo "$wf never passed on $sha; run it on that commit first"; exit 1; }
+          done
+
   build:
     name: ${{ matrix.target }}
+    needs: gate
     runs-on: ${{ matrix.os }}
     defaults:
       run:

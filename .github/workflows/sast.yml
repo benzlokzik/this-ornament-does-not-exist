@@ -19,6 +19,7 @@ on:
       - ".github/workflows/**"
   schedule:
     - cron: "45 7 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
