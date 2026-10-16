@@ -3,6 +3,8 @@ platforms:
 - name: linux-64
 - name: linux-aarch64
 - name: osx-arm64
+- name: win-64
+- name: win-arm64
 environments:
   default:
     channels:
@@ -50,6 +52,21 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-aarch64-apple-darwin-1.99.0-h451e77e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prek-0.5.5-hc2d82ec_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/rust-1.99.0-haf00ee1_0.conda
+      win-64:
+      - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-pc-windows-msvc-1.99.0-h5a2a77e_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/prek-0.5.5-h18a1a76_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/rust-1.99.0-h62b76ba_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/ucrt-10.0.26100.0-h57928b3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/vc-14.5-ha367084_41.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/vc14_runtime-14.51.36247-habf1de7_41.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/vcomp14-14.51.36247-habf1de7_41.conda
+      win-arm64:
+      - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-aarch64-pc-windows-msvc-1.99.0-hfc995c0_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-arm64/prek-0.5.5-hef14203_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-arm64/rust-1.99.0-h77639e3_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-arm64/vc-14.5-h709d11b_41.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-arm64/vc14_runtime-14.51.36247-hc70ed48_41.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-arm64/vcomp14-14.51.36247-hc70ed48_41.conda
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
   build_number: 20
@@ -447,6 +464,18 @@ packages:
   run_exports: {}
   size: 40414488
   timestamp: 1791710767605
+- conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-aarch64-pc-windows-msvc-1.99.0-hfc995c0_0.conda
+  sha256: 2032d5f9b9334ceec2efd4e96b5c90783f3644128741efa7a71e149370e3c799
+  md5: 5ae613d6d56c55f05af653a2b4de47d8
+  depends:
+  - __win
+  constrains:
+  - rust >=1.99.0,<1.99.1.0a0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 31456541
+  timestamp: 1791710761974
 - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-aarch64-unknown-linux-gnu-1.99.0-hb0489cc_0.conda
   sha256: 6f953dc2ae0c74517296ee78773dc6a6645794fae4f483d121aace53d9698fe9
   md5: b4dc20aa9d1ebe6b82e1a7da4616536a
@@ -459,6 +488,18 @@ packages:
   run_exports: {}
   size: 41692329
   timestamp: 1791710774769
+- conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-pc-windows-msvc-1.99.0-h5a2a77e_0.conda
+  sha256: 25a58a0461c51982bf2d618a4e39df5fdcaf9bc89d8aa47313d76f7cf723c32f
+  md5: 90a09b9437fa537d8494b7ff1c7cedf8
+  depends:
+  - __win
+  constrains:
+  - rust >=1.99.0,<1.99.1.0a0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 31110978
+  timestamp: 1791710757146
 - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-unknown-linux-gnu-1.99.0-h480d76f_0.conda
   sha256: 3bf979d938914818eefaa0bc6d0d07f518f332b2e3a4e040c78f1f89c187d529
   md5: 891c33341ac583b4c6a0cddfcab83ebb
@@ -528,3 +569,127 @@ packages:
   run_exports: {}
   size: 123173460
   timestamp: 1791710767605
+- conda: https://conda.anaconda.org/conda-forge/win-64/prek-0.5.5-h18a1a76_0.conda
+  sha256: 4ef7d88286190c0a74fd2a751f02ac1aa88124fa96b43d800540160524233ea2
+  md5: 7be2f40c478f14a388bf3ab7762124c6
+  depends:
+  - vc >=14.3,<15
+  - vc14_runtime >=14.44.35208
+  - ucrt >=10.0.20348.0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 4833478
+  timestamp: 1791202732084
+- conda: https://conda.anaconda.org/conda-forge/win-64/rust-1.99.0-h62b76ba_0.conda
+  sha256: c56cb905fe4a84f680efbd608630260b7710f414b778de806b1e05954b3e9c64
+  md5: d3c01d9b79ed8881b6ba3c0b8de689f6
+  depends:
+  - rust-std-x86_64-pc-windows-msvc ==1.99.0 h5a2a77e_0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 230137936
+  timestamp: 1791710757146
+- conda: https://conda.anaconda.org/conda-forge/win-64/ucrt-10.0.26100.0-h57928b3_0.conda
+  sha256: 3005729dce6f3d3f5ec91dfc49fc75a0095f9cd23bab49efb899657297ac91a5
+  md5: 71b24316859acd00bdb8b38f5e2ce328
+  constrains:
+  - vc14_runtime >=14.29.30037
+  - vs2015_runtime >=14.29.30037
+  license: LicenseRef-MicrosoftWindowsSDK10
+  run_exports: {}
+  size: 694692
+  timestamp: 1756385147981
+- conda: https://conda.anaconda.org/conda-forge/win-64/vc-14.5-ha367084_41.conda
+  sha256: 35444c55a92e2f7f7ba26bc70f81e56e52344f7d064c0fd4b40a46a58517b79c
+  md5: aa805b5522c2a98fa286e551a1f48546
+  depends:
+  - vc14_runtime >=14.51.36247
+  track_features:
+  - vc14
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports: {}
+  size: 21383
+  timestamp: 1785359368566
+- conda: https://conda.anaconda.org/conda-forge/win-64/vc14_runtime-14.51.36247-habf1de7_41.conda
+  sha256: 4e4cb599cdc41bf2109d1464c127b5bcbddf548ce3e322e612afb691338b48f8
+  md5: ac5333bb3d429361f23adf704cc49a78
+  depends:
+  - ucrt >=10.0.20348.0
+  - vcomp14 14.51.36247 habf1de7_41
+  constrains:
+  - vs2015_runtime 14.51.36247.* *_41
+  license: LicenseRef-MicrosoftVisualCpp2015-2022Runtime
+  license_family: Proprietary
+  run_exports: {}
+  size: 767955
+  timestamp: 1785359364369
+- conda: https://conda.anaconda.org/conda-forge/win-64/vcomp14-14.51.36247-habf1de7_41.conda
+  sha256: 731e043390c9457299484d39e427221fc868a9249540a498a5a4f6456c7744d1
+  md5: 350bb67a5c8e5f1c53347ac544ab6600
+  depends:
+  - ucrt >=10.0.20348.0
+  constrains:
+  - vs2015_runtime 14.51.36247.* *_41
+  license: LicenseRef-MicrosoftVisualCpp2015-2022Runtime
+  license_family: Proprietary
+  run_exports:
+    strong:
+    - vcomp14 >=14.51.36247
+  size: 155910
+  timestamp: 1785359349999
+- conda: https://conda.anaconda.org/conda-forge/win-arm64/prek-0.5.5-hef14203_0.conda
+  sha256: d152b569170696fca3ea2c6bf1163e80179d3c7b747d1ba1abc5e1dfc0f30522
+  md5: 406ffc4d7fbd0872d28fd0bc52c260a0
+  depends:
+  - vc >=14.3,<15
+  - vc14_runtime >=14.44.35208
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 4769402
+  timestamp: 1791202722682
+- conda: https://conda.anaconda.org/conda-forge/win-arm64/rust-1.99.0-h77639e3_0.conda
+  sha256: b6243caf52c31bac5404f3afe04c81a1fb995a275db05add9c61c517a2c4d8ef
+  md5: 86ed7e6429c4a1a215f21f15768f532e
+  depends:
+  - rust-std-aarch64-pc-windows-msvc ==1.99.0 hfc995c0_0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 223070528
+  timestamp: 1791710761974
+- conda: https://conda.anaconda.org/conda-forge/win-arm64/vc-14.5-h709d11b_41.conda
+  sha256: 8c3c7cc4124d27dbd92775f84075f1f357e6bc5f47af6f8e2fd33830e16dac35
+  md5: 9d53ea053f93f038ab0bf1fe8cc41702
+  depends:
+  - vc14_runtime >=14.51.36247
+  track_features:
+  - vc14
+  license: BSD-3-Clause
+  license_family: BSD
+  run_exports: {}
+  size: 20910
+  timestamp: 1785358511014
+- conda: https://conda.anaconda.org/conda-forge/win-arm64/vc14_runtime-14.51.36247-hc70ed48_41.conda
+  sha256: ea0a090623f6abee7aae64d0fb1c5e65eab38ac9568e11a5c6f8cfcfd8fbe088
+  md5: 3f2f376e751a8ce8d60de9490e963b83
+  depends:
+  - vcomp14 14.51.36247 hc70ed48_41
+  license: LicenseRef-MicrosoftVisualCpp2015-2022Runtime
+  license_family: Proprietary
+  run_exports: {}
+  size: 15284515
+  timestamp: 1785358488993
+- conda: https://conda.anaconda.org/conda-forge/win-arm64/vcomp14-14.51.36247-hc70ed48_41.conda
+  sha256: 93aa964c55c67dcda850243ea2c36069c3204f179190cecf02d592bdc9d5afd0
+  md5: 4f7e33b12c9e9618bd245da82161de31
+  license: LicenseRef-MicrosoftVisualCpp2015-2022Runtime
+  license_family: Proprietary
+  run_exports:
+    strong:
+    - vcomp14 >=14.51.36247
+  size: 22304
+  timestamp: 1785358482308
