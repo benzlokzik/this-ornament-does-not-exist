@@ -86,7 +86,7 @@ jobs:
             tar -C dist -czf "dist/$archive" "$name"
           fi
           (cd dist && { shasum -a 256 "$archive" || sha256sum "$archive"; } > "$archive.sha256")
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: orna-${{ matrix.target }}
           path: |
@@ -102,14 +102,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: orna-*
           path: dist
           merge-multiple: true
       - name: list
         run: ls -l dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           name: orna ${{ env.TAG }}
